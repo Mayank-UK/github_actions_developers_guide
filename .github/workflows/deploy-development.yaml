@@ -1,33 +1,31 @@
-# CD: deploy development when the CI workflow completes successfully on
-# `development`.
+# CD: deploy development — started MANUALLY on `development`.
 #
-# Trigger: workflow_run — fires when the workflow named "CI" (workflow_run
-# filters match the workflow NAME string, not its file name) completes on
-# branch `development`. The job-level guard below skips anything whose
-# conclusion is not 'success', so red/cancelled/skipped CI never deploys.
+# Trigger: workflow_dispatch only (no inputs). This workflow USED to fire
+# automatically via workflow_run when the workflow named "CI" completed on
+# branch `development`. That automatic trigger was removed for an
+# operational reason worth internalizing: the job below requires the
+# self-hosted runner (labels [self-hosted, deploy-local]) — a Mac that is
+# usually offline — so every push left the deploy QUEUED FOREVER waiting
+# for a runner that was not there. The lab now deploys deliberately:
+# runner up (`task runner-start`), then Run workflow.
 #
-# workflow_dispatch (no inputs): manual re-run button for debugging — deploys
-# the moving `development` image tag (newest images CI built), because the
-# dispatched branch HEAD may be a paths-filtered commit CI never builtushed
-# images for that commit (same rollout gate as below).
+# Dispatch deploys the moving `development` image tag (newest images CI
+# built), because the dispatched branch HEAD may be a paths-filtered commit
+# CI never built images for (the rollout gate would fail loudly on it —
+# ImagePullBackOff after 180s, same gate as below).
 #
-# KNOWN INTERACTION with CI's skip-build input: a manual CI dispatch with
-# skip-build=true still completes 'success' (tests+render only, no images
-# pushed) and therefore still triggers this workflow. If images for that sha
-# were never pushed, the composite action's rollout gate fails visibly
-# (ImagePullBackOff after 180s). Accepted and documented.
-#
-# CORRECTNESS under workflow_run: `github.sha` is the DEFAULT branch's commit
-# in this event context, NOT the CI run's commit. The deploy tag therefore
-# derives from `github.event.workflow_run.head_sha` — the commit CI actually
-# built and pushed.
+# HISTORICAL, workflow_run era (the job below still carries its shape): the
+# 'completed' event fired on EVERY conclusion — hence the success guard in
+# the `if:` — and `github.sha` was the DEFAULT branch's commit, not the CI
+# run's, so the built commit was read from
+# `github.event.workflow_run.head_sha` (the checkout/tag expressions keep
+# the head_sha-then-github.sha fallback; under dispatch, head_sha is empty
+# and github.sha IS the dispatched ref's own commit). A manual CI dispatch
+# with skip-build=true also completed 'success' without pushing images —
+# the auto-trigger then failed at the rollout gate, visibly.
 name: Deploy development
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [development]
   workflow_dispatch:
 
 permissions:
