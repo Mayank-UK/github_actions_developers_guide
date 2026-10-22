@@ -33,6 +33,7 @@ RUN apk add --no-cache curl \
 
 # *.html: the guide shell (index.html) + the interactive demo page (demo.html).
 COPY app/frontend/*.html /usr/share/nginx/html/
+COPY app/frontend/favicon.svg /usr/share/nginx/html/
 COPY app/frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY GUIDE.md /usr/share/nginx/html/GUIDE.md
 
