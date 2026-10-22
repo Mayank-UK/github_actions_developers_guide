@@ -32,6 +32,12 @@
 # failure mode.
 name: Deploy development
 
+# One deploy-dev evaluation at a time; a newer CI completion cancels the
+# older run's evaluation (they are skip-checks — collapsing keeps the list 1:1).
+concurrency:
+  group: deploy-development
+  cancel-in-progress: true
+
 on:
   workflow_run:
     workflows: [CI]
@@ -74,11 +80,15 @@ jobs:
           fi
 
           # Is the self-hosted lab runner (mac-local) accepting jobs?
-          status="$(curl -fsS --max-time 30 \
+          # The runners API 403s the workflow's GITHUB_TOKEN in some
+          # workflow_run contexts; a query failure is treated as OFFLINE —
+          # this job NEVER goes red over a status lookup (a manual dispatch
+          # still reaches a running lab whenever the runner really is up).
+          status="$(curl -sS --max-time 30 \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H 'Accept: application/vnd.github+json' \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runners" \
-            | jq -r '.runners[] | select(.name == "mac-local") | .status' | head -n 1)"
+            | jq -r '.runners[] | select(.name == "mac-local") | .status' 2>/dev/null | head -n 1 || true)"
 
           if [ "$status" = "online" ]; then
             echo "runner_online=true" >> "$GITHUB_OUTPUT"

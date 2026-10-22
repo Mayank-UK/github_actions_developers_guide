@@ -277,13 +277,17 @@ on:
         required: false
         type: boolean
         default: false
+  # PR checks exist for PRs INTO development (feature -> dev); release PRs
+  # (-> production) are validated by the merge push itself, so every change
+  # produces exactly one CI run.
   pull_request:
+    branches: [development]
   push:
     branches: [development, production]
 ```
 
-Read it as: CI runs on a manual dispatch with a `skip-build` toggle; on every
-pull request; and on pushes to the two release branches — `development`
+Read it as: CI runs on a manual dispatch with a `skip-build` toggle; on PRs
+into `development`; and on pushes to the two release branches — `development`
 (builds the lab images) and `production` (validates and publishes the site
 images). There is deliberately no `paths:` filter: almost every file in this
 small repo feeds some job — app code, Dockerfiles, this guide (its snippet
@@ -1081,12 +1085,18 @@ to it (§15's job reads this API):
 
 <!-- source: .github/workflows/deploy-development.yaml -->
 ```yaml
-          status="$(curl -fsS --max-time 30 \
+          status="$(curl -sS --max-time 30 \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H 'Accept: application/vnd.github+json' \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runners" \
-            | jq -r '.runners[] | select(.name == "mac-local") | .status' | head -n 1)"
+            | jq -r '.runners[] | select(.name == "mac-local") | .status' 2>/dev/null | head -n 1 || true)"
 ```
+
+A subtlety this block teaches by living it: the runners API sometimes
+refuses the workflow's own `GITHUB_TOKEN` with a 403 — so the query can
+NEVER be allowed to fail the check (`-sS` not `-fsS`, jq errors swallowed,
+`|| true`): a status lookup problem must read as "offline", not as a red
+build. The check job is deliberately un-failable.
 
 If a workflow declares nothing, the repo default applies (Settings → Actions →
 General → Workflow permissions — read-only or read-write; GitHub has pushed

@@ -27,7 +27,11 @@ on:
   # Every push to either release branch and every PR, deliberately WITHOUT a
   # paths filter: the repo is small and almost any file feeds some job
   # (app/, .docker/, GUIDE.md, scripts/, e2e/, the workflows themselves).
+  # PR checks exist for PRs INTO development (feature -> dev); release PRs
+  # (-> production) are validated by the merge push itself, so every change
+  # produces exactly one CI run.
   pull_request:
+    branches: [development]
   push:
     branches: [development, production]
 
@@ -567,7 +571,7 @@ jobs:
             # indistinguishable — the 2026-10-21 incident deleted
             # freshly pushed children and broke every pull.
             local candidates
-            candidates="$(printf '%s' "$merged" | jq -argjson keep "$keep" '
+            candidates="$(printf '%s' "$merged" | jq --argjson keep "$keep" '
               [ .[]
                 | select((.metadata.container.tags // [])
                      | any(.[]; test("^sha-[0-9a-f]{7}$"))) ]
