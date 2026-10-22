@@ -9,7 +9,7 @@ name: CI (site)
 
 on:
     push:
-        branches: [production]
+        branches: [development]
     pull_request:
 
 permissions:
@@ -216,7 +216,7 @@ jobs:
     vm-arch:
         name: Detect VM architecture
         runs-on: ubuntu-latest
-        if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/development'
         # The VM SSH secrets live in the production environment — the same
         # scope the deploy workflow reads them from.
         environment: production
@@ -265,7 +265,7 @@ jobs:
     build-push:
         name: Build and publish production images
         needs: [e2e, vm-arch]
-        if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/development'
         runs-on: ubuntu-latest
         permissions:
             contents: read
@@ -333,7 +333,7 @@ jobs:
                   sbom: true
                   tags: |
                       ${{ matrix.image }}:${{ steps.image_tag.outputs.tag }}
-                      ${{ matrix.image }}:production
+                      ${{ matrix.image }}:development
                   cache-from: type=gha,scope=${{ matrix.service }}
                   cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
@@ -351,7 +351,7 @@ jobs:
     ghcr-prune:
         name: Prune old GHCR image tags
         needs: [build-push]
-        if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/development'
         runs-on: ubuntu-latest
         permissions:
             contents: read
