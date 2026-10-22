@@ -22,7 +22,7 @@ on:
     workflow_run:
         workflows: ['CI (site)']
         types: [completed]
-        branches: [development]
+        branches: [production]
     workflow_dispatch:
         inputs:
             image_tag:
@@ -47,7 +47,7 @@ jobs:
               github.event_name == 'workflow_run' &&
               github.event.workflow_run.conclusion == 'success' &&
               github.event.workflow_run.event == 'push' &&
-              github.event.workflow_run.head_branch == 'development' &&
+              github.event.workflow_run.head_branch == 'production' &&
               github.event.workflow_run.head_repository.full_name == github.repository
             )
 
@@ -62,7 +62,7 @@ jobs:
             - name: Check out repository history
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
-                  ref: refs/heads/development
+                  ref: refs/heads/production
                   fetch-depth: 0
 
             - name: Resolve deployment commit and image tag
@@ -94,7 +94,7 @@ jobs:
                   sha="$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')"
 
                   # Only deploy commits reachable from the production branch.
-                  if ! git merge-base --is-ancestor "$sha" origin/development; then
+                  if ! git merge-base --is-ancestor "$sha" origin/production; then
                     echo "Refusing deployment: commit is not on the production history." >&2
                     exit 1
                   fi

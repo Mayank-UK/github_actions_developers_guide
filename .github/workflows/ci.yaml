@@ -3,8 +3,8 @@
 #   render ───────┘
 #   guide — validates GUIDE.md snippets against the files they quote
 # CI ends at build+push. Deploys live in one workflow per environment:
-#   deploy-development.yaml (workflow_run on this workflow's success on
-#   development), deploy-staging.yaml, deploy-production.yaml (push-triggered).
+#   deploy-{development,staging,production}.yaml (all workflow_dispatch —
+#   the self-hosted runner is usually offline; see each file's header).
 # Every `uses:` is pinned to a full 40-char commit SHA with the release tag in a
 # trailing comment (supply-chain hygiene; updates via Dependabot/renovate).
 name: CI
@@ -21,11 +21,10 @@ on:
     branches: [development, staging, production]
     # Union of paths needed by ALL jobs (GitHub workflows do not support YAML
     # anchors, so the list is duplicated below). test-matrix also runs on
-    # .k8s-only changes — accepted for simplicity instead of per-job path gating.
+    # compose-only changes — accepted for simplicity instead of per-job path gating.
     paths:
       - 'app/**'
       - '.docker/**'
-      - '.k8s/**'
       - 'GUIDE.md'
       - 'scripts/**'
       - '.github/workflows/ci.yaml'
@@ -34,7 +33,6 @@ on:
     paths:
       - 'app/**'
       - '.docker/**'
-      - '.k8s/**'
       - 'GUIDE.md'
       - 'scripts/**'
       - '.github/workflows/ci.yaml'
@@ -116,19 +114,18 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
-        with:
-          version: v1.36.1 # pinned kubectl binary (matches the local kind cluster's client)
-      - name: Render kustomize overlay
+      - name: Render compose stack
+        # docker compose config interpolates and merges the file into the
+        # final stack definition — the deploy-side equivalent of `kubectl
+        # kustomize`, on the preinstalled docker CLI of ubuntu-latest.
         run: |
           set -euo pipefail
-          out="$(kubectl kustomize .k8s/overlays/${{ matrix.env }})"
+          out="$(docker compose -f .docker/docker-compose.${{ matrix.env }}.yml config)"
           if [ -z "$out" ]; then
-            echo "::error::.k8s/overlays/${{ matrix.env }} rendered to EMPTY output"
+            echo "::error::docker-compose.${{ matrix.env }}.yml rendered to EMPTY output"
             exit 1
           fi
-          echo "overlay ${{ matrix.env }}: $(printf '%s\n' "$out" | wc -l | tr -d ' ') lines rendered"
+          echo "stack ${{ matrix.env }}: $(printf '%s\n' "$out" | wc -l | tr -d ' ') lines rendered"
 
   guide:
     name: guide snippets

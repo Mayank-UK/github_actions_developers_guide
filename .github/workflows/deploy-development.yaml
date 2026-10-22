@@ -11,8 +11,8 @@
 #
 # Dispatch deploys the moving `development` image tag (newest images CI
 # built), because the dispatched branch HEAD may be a paths-filtered commit
-# CI never built images for (the rollout gate would fail loudly on it —
-# ImagePullBackOff after 180s, same gate as below).
+# CI never built images for (the deploy's pull step would fail loudly on it
+# within seconds, same gate as below).
 #
 # HISTORICAL, workflow_run era (the job below still carries its shape): the
 # 'completed' event fired on EVERY conclusion — hence the success guard in
@@ -22,7 +22,7 @@
 # the head_sha-then-github.sha fallback; under dispatch, head_sha is empty
 # and github.sha IS the dispatched ref's own commit). A manual CI dispatch
 # with skip-build=true also completed 'success' without pushing images —
-# the auto-trigger then failed at the rollout gate, visibly.
+# the auto-trigger then failed at the deploy's pull step, visibly.
 name: Deploy development
 
 on:
@@ -37,8 +37,8 @@ jobs:
     # workflow_run 'completed' fires on EVERY conclusion; deploy only on green
     # CI. Manual dispatch runs have no workflow_run payload — always deploy.
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    # Runs on the self-hosted runner that lives next to the kind cluster
-    # (label deploy-local — see runner/README.md).
+    # Runs on the self-hosted runner that lives next to the Docker host the
+    # environments deploy to (label deploy-local — see GUIDE.md Part II).
     runs-on: [self-hosted, deploy-local]
     environment: development
     # Serialize development deploys; never cancel a rollout already in flight.
@@ -81,13 +81,13 @@ jobs:
             echo "tag=sha-${HEAD_SHA:0:7}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Deploy development overlay
+      - name: Deploy development stack
         # Composite actions cannot read the `secrets` context — the token is
         # injected via env (stays masked in logs).
         uses: ./.github/actions/deploy-env
         env:
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
         with:
-          env: development # kustomize overlay / namespace (github-actions-development); matches the GitHub environment above
+          env: development # compose stack (file .docker/docker-compose.development.yml, project github-actions-development); matches the GitHub environment above
           image_prefix: ${{ steps.img.outputs.prefix }}
           image_tag: ${{ steps.img.outputs.tag }}
