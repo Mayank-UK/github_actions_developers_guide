@@ -2,9 +2,13 @@ version: '3'
 
 # Local-dev loop for the github-actions lab. Everything runs from the repo root
 # (go-task sets the working dir to this Taskfile's directory).
+#
+# Deployment model: plain docker compose, one stack per environment
+# (.docker/docker-compose.<env>.yml — project github-actions-<env>, frontend
+# published on 127.0.0.1:8080/8081/8082). No kind, no kubectl: the lab
+# teaches GitHub Actions, not Kubernetes.
 
 vars:
-  CLUSTER: github-actions
   TAG: p0
   SERVICES:
     - facts
@@ -13,14 +17,12 @@ vars:
     - frontend
   ENVIRONMENTS: [development, staging, production]
   ENV: development # default environment for `task deploy` — override: task deploy ENV=staging
-  INGRESS_NGINX_VERSION: controller-v1.15.1
-  INGRESS_NGINX_URL: 'https://raw.githubusercontent.com/kubernetes/ingress-nginx/{{.INGRESS_NGINX_VERSION}}/deploy/static/provider/kind/deploy.yaml'
 
 tasks:
   up:
-    desc: Full bootstrap — the "resume after reboot (or 2 years later)" one-shot. Docker check, kind cluster (start stopped nodes, or create+ingress), runner check, overlays only if namespaces missing, then smoke.
+    desc: Full bootstrap — the "resume after reboot (or 2 years later)" one-shot. Docker check, bring each environment stack up (no-op when already running; starts stopped containers), runner check, then smoke.
     cmds:
-      # 1. Everything runs on Docker Desktop (kind nodes are containers).
+      # 1. Everything runs on Docker Desktop (the compose stacks are its containers).
       - |
         if ! docker info >/dev/null 2>&1; then
           echo 'Docker Desktop is not running.' >&2
@@ -28,28 +30,14 @@ tasks:
           exit 1
         fi
         echo 'docker: ok'
-      # 2. Cluster: start stopped kind node containers, else create from scratch.
+      # 2. Stacks: restart policies keep containers across reboots, but if
+      #    Docker was down this brings any stopped container back, waits for
+      #    health, and is a no-op for stacks that never stopped.
       - |
-        if kind get clusters 2>/dev/null | grep -qx '{{.CLUSTER}}'; then
-          stopped="$(docker ps -a --filter 'name={{.CLUSTER}}-' --filter status=exited -q)"
-          if [ -n "$stopped" ]; then
-            echo "starting stopped kind nodes: $stopped"
-            docker start $stopped
-          else
-            echo 'kind nodes already running'
-          fi
-          # API server needs a moment after container start.
-          ready=0
-          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-            kubectl get --raw /readyz >/dev/null 2>&1 && { ready=1; break; } || sleep 5
-          done
-          [ "$ready" = 1 ] || { echo 'FAIL: kind API server not ready after 100s' >&2; exit 1; }
-          kubectl wait --for=condition=Ready nodes --all --timeout=300s
-        else
-          echo 'no {{.CLUSTER}} cluster — creating'
-          task: cluster-create
-          task: ingress
-        fi
+        for env in development staging production; do
+          echo "== stack github-actions-$env =="
+          docker compose --file ".docker/docker-compose.$env.yml" up -d --wait
+        done
       # 3. Self-hosted runner: verify only, never auto-start (it's a
       #    user-owned foreground-ish process, not something task should spawn).
       - |
@@ -60,20 +48,7 @@ tasks:
           echo '  cd /Users/mak/Development/temp/actions-runner && nohup ./run.sh > runner.out 2>&1 &'
           echo '(or: task runner-start)'
         fi
-      # 4. Overlays only where the namespace is missing (reboot-resume keeps them).
-      - |
-        for env in development staging production; do
-          if kubectl get namespace "github-actions-$env" >/dev/null 2>&1; then
-            echo "namespace github-actions-$env: present"
-          else
-            echo "namespace github-actions-$env missing — applying overlay"
-            kubectl apply -k ".k8s/overlays/$env"
-            for d in facts counter image frontend; do
-              kubectl rollout status deployment/$d -n "github-actions-$env" --timeout=300s
-            done
-          fi
-        done
-      # 5. Prove the whole stack answers.
+      # 4. Prove the whole lab answers.
       - task: smoke
 
   runner-start:
@@ -95,7 +70,7 @@ tasks:
         fi
 
   runner-stop:
-    desc: Stop the self-hosted runner (shows the matching process count and asks before pkill)
+    desc: Stop the self-hosted GitHub Actions runner (shows the matching process count and asks before pkill)
     cmds:
       - |
         pids="$(pgrep -f 'Runner[.]Listener' || true)"
@@ -117,126 +92,61 @@ tasks:
     cmds:
       - python3 scripts/check_snippets.py
 
-  cluster-create:
-    desc: Create the kind cluster (1 ingress-ready control-plane + 2 workers, host 8080 -> node 80)
-    cmds:
-      - kind create cluster --config .k8s/kind-cluster.yaml --name {{.CLUSTER}}
-
-  cluster-delete:
-    desc: Delete the kind cluster
-    cmds:
-      - kind delete cluster --name {{.CLUSTER}}
-
-  ingress:
-    desc: Install ingress-nginx (kind provider build, version pinned) and wait for it
-    cmds:
-      - kubectl apply -f {{.INGRESS_NGINX_URL}}
-      # The kind deploy.yaml only node-selects kubernetes.io/os=linux, so on a
-      # multi-node cluster the hostPort-80 controller can land on a worker the
-      # 8080->80 extraPortMapping (control-plane only) cannot reach. Pin it to
-      # the node labeled ingress-ready=true (toleration already in the manifest).
-      - >
-        kubectl -n ingress-nginx patch deployment ingress-nginx-controller --type=strategic
-        -p '{"spec":{"template":{"spec":{"nodeSelector":{"ingress-ready":"true"}}}}}'
-      - kubectl -n ingress-nginx wait --for=condition=Available deployment/ingress-nginx-controller --timeout=300s
-      # Available alone can be reported from the pre-patch ReplicaSet — also
-      # wait for the pinned rollout to actually finish.
-      - kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=300s
-
   build:
-    desc: Build the 4 service images (plain docker build — host and kind nodes are both arm64). frontend builds from the repo-root context so GUIDE.md gets baked into the image.
+    desc: Build the 4 service images with the local p0 tags (the compose files' IMG_PREFIX/IMG_TAG defaults). frontend builds from the repo-root context so GUIDE.md gets baked into the image.
     cmds:
-      # The frontend Dockerfile COPYs app/frontend/* AND the repo-root GUIDE.md,
-      # so its build context is `.` — not app/frontend.
+      # Image names mirror the CI/GHCR shape (…/github-actions-<svc>) with a
+      # local prefix, so the SAME compose file works for local and CD flows.
+      # The frontend Dockerfile COPYs app/frontend/* AND the repo-root
+      # GUIDE.md, so its build context is `.` — not app/frontend.
       - for: { var: SERVICES }
-        cmd: docker build -f .docker/{{.ITEM}}/Dockerfile -t github-actions/{{.ITEM}}:{{.TAG}} {{if eq .ITEM "frontend"}}.{{else}}app/{{.ITEM}}{{end}}
-
-  load:
-    desc: Load the 4 images into the kind cluster
-    cmds:
-      - for: { var: SERVICES }
-        cmd: kind load docker-image github-actions/{{.ITEM}}:{{.TAG}} --name {{.CLUSTER}}
+        cmd: docker build -f .docker/{{.ITEM}}/Dockerfile -t github-actions/github-actions-{{.ITEM}}:{{.TAG}} {{if eq .ITEM "frontend"}}.{{else}}app/{{.ITEM}}{{end}}
 
   deploy:
-    desc: Apply one overlay (ENV=development|staging|production, default development) and wait for all rollouts
+    desc: Bring up one environment stack (ENV=development|staging|production, default development) and wait for health. Local p0 images by default; CD-style GHCR images via IMG_PREFIX/IMG_TAG (requires a prior `docker login ghcr.io`).
     cmds:
-      - kubectl apply -k .k8s/overlays/{{.ENV}}
-      - |
-        for d in facts counter image frontend; do
-          kubectl rollout status deployment/$d -n github-actions-{{.ENV}} --timeout=180s
-        done
+      - docker compose --file .docker/docker-compose.{{.ENV}}.yml up -d --wait
 
   deploy-all:
-    desc: Build + load images, then apply development, staging and production overlays
+    desc: Build local images, then bring up development, staging and production stacks
     deps: [build]
     cmds:
-      - task: load
       - for: { var: ENVIRONMENTS }
         task: deploy
         vars:
           ENV: '{{.ITEM}}'
 
-  pull-secret:
-    desc: Apply the ghcr-pull imagePullSecret to all three namespaces (requires GHCR_PULL_TOKEN env var — a classic PAT with read:packages)
+  down:
+    desc: Take one environment stack down (ENV=development|staging|production, default development); containers and network removed, images kept
     cmds:
-      - |
-        set -euo pipefail
-        if [ -z "${GHCR_PULL_TOKEN:-}" ]; then
-          echo "REFUSED: GHCR_PULL_TOKEN is empty or unset." >&2
-          echo "  Create a classic PAT with read:packages at https://github.com/settings/tokens," >&2
-          echo "  then: export GHCR_PULL_TOKEN=<token> && task pull-secret" >&2
-          exit 1
-        fi
-        owner="${GHCR_OWNER:-Mayank-UK}"
-        for env in development staging production; do
-          kubectl create secret docker-registry ghcr-pull \
-            --docker-server=ghcr.io \
-            --docker-username="$owner" \
-            --docker-password="$GHCR_PULL_TOKEN" \
-            -n "github-actions-$env" \
-            --dry-run=client -o yaml | kubectl apply -f -
-        done
+      - docker compose --file .docker/docker-compose.{{.ENV}}.yml down
 
   smoke:
-    desc: Smoke-test all three environments through the ingress (curl --resolve, no /etc/hosts needed)
+    desc: Smoke-test all three environments on their published ports (frontend 200 + facts JSON through the dev stack's API)
     cmds:
       - |
         set -e
         for env in development staging production; do
+          case "$env" in
+            development) port=8080 ;;
+            staging)     port=8081 ;;
+            production)  port=8082 ;;
+          esac
           code=000
           for _ in 1 2 3 4 5 6 7 8 9 10; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --resolve "$env.github-actions.test:8080:127.0.0.1" "http://$env.github-actions.test:8080/")
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/")
             [ "$code" = "200" ] && break
             sleep 3
           done
-          echo "$env frontend -> HTTP $code"
+          echo "$env frontend (port $port) -> HTTP $code"
           [ "$code" = "200" ] || { echo "FAIL: $env frontend not 200"; exit 1; }
         done
       - |
         set -e
         body=''
         for _ in 1 2 3 4 5 6 7 8 9 10; do
-          body=$(curl -sf --resolve development.github-actions.test:8080:127.0.0.1 'http://development.github-actions.test:8080/api/facts?topic=rocket' 2>/dev/null) && break
+          body=$(curl -sf 'http://127.0.0.1:8080/api/facts?topic=rocket' 2>/dev/null) && break
           sleep 3
         done
         echo "development /api/facts -> $(echo "$body" | head -c 120)"
         echo "$body" | grep -q '"facts"' || { echo "FAIL: /api/facts did not return facts JSON"; exit 1; }
-
-  hosts:
-    desc: ONE-TIME setup — idempotently add the three github-actions hosts to /etc/hosts (browser use only; curls above use --resolve)
-    cmds:
-      - |
-        line='127.0.0.1 development.github-actions.test staging.github-actions.test production.github-actions.test'
-        if grep -qF 'development.github-actions.test' /etc/hosts; then
-          echo 'github-actions hosts already present in /etc/hosts'
-        else
-          # Replace, don't just append: drop any pre-rename line (dev./prod.
-          # hosts). The pattern cannot match the full-word hosts ('dev.'/'prod.'
-          # require a literal dot right after the short word).
-          if grep -qE '(dev|prod)\.github-actions\.test' /etc/hosts; then
-            grep -vE '(dev|prod)\.github-actions\.test' /etc/hosts | sudo tee /etc/hosts > /dev/null
-            echo 'removed pre-rename github-actions hosts line from /etc/hosts'
-          fi
-          printf '%s\n' "$line" | sudo tee -a /etc/hosts > /dev/null
-          echo "added to /etc/hosts: $line"
-        fi

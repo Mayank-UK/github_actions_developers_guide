@@ -1,0 +1,87 @@
+# staging stack — the docker compose deployment for ONE environment.
+#
+# Convention: one compose FILE per environment
+# (.docker/docker-compose.<env>.yml), each with its own project NAME and its
+# own published frontend port, so three environments coexist on one Docker
+# host as three isolated stacks (own network, own containers):
+#   docker compose -f .docker/docker-compose.staging.yml up -d --wait
+# The project (name: below) and the port are what this lab formerly used a
+# Kubernetes namespace + ingress host for — plain compose now; the guide
+# teaches GitHub Actions, not Kubernetes.
+#
+# Images interpolate TWO knobs, both defaulted to the local-dev flow
+# (`task build` tags github-actions/github-actions-<svc>:p0). CD exports both
+# before `docker compose up`: IMG_PREFIX=ghcr.io/<owner>, IMG_TAG=sha-<7>
+# (or the moving `development` tag). The vars are named IMG_* on purpose:
+# the sibling .docker/.env belongs to the SITE pipeline's compose pair and
+# auto-loads for every compose invocation whose first -f file lives in this
+# directory — its IMAGE_TAG must not leak into these stacks' defaults.
+name: github-actions-staging
+
+services:
+  facts:
+    image: ${IMG_PREFIX:-github-actions}/github-actions-facts:${IMG_TAG:-p0}
+    restart: unless-stopped
+    environment:
+      # Service-to-service call: compose DNS resolves the sibling service
+      # name on the project's default network (same name the frontend's
+      # nginx upstreams use).
+      COUNTER_URL: http://counter:3000
+    healthcheck:
+      # python:3.12-slim ships no wget/curl — urllib it is.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  counter:
+    image: ${IMG_PREFIX:-github-actions}/github-actions-counter:${IMG_TAG:-p0}
+    restart: unless-stopped
+    healthcheck:
+      # node:20-alpine ships busybox wget. 127.0.0.1, not localhost: busybox
+      # resolves localhost to ::1 first, the app binds IPv4 only.
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/health"]
+      interval: 5s
+      timeout: 3s
+      # Generous budget on purpose: npm+node cold start can take ~40s under
+      # memory pressure on the Mac (hard-won in the kind era — readiness may
+      # gate traffic while warming, but slow starts must not fail the deploy).
+      retries: 12
+      start_period: 10s
+
+  image:
+    image: ${IMG_PREFIX:-github-actions}/github-actions-image:${IMG_TAG:-p0}
+    restart: unless-stopped
+    healthcheck:
+      # /healthz — the liveness/readiness path convention the Go service
+      # kept when the k8s layer went away.
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  frontend:
+    image: ${IMG_PREFIX:-github-actions}/github-actions-frontend:${IMG_TAG:-p0}
+    restart: unless-stopped
+    ports:
+      # Loopback only: the lab is local; no reason to expose it past the Mac.
+      # Distinct port per environment = distinct "environment URL".
+      - "127.0.0.1:8081:80"
+    depends_on:
+      # nginx resolves its proxy_pass upstreams (facts/counter/image) once at
+      # startup and never re-resolves, so the backends must be up AND healthy
+      # before the frontend starts — or nginx exits "host not found".
+      facts:
+        condition: service_healthy
+      counter:
+        condition: service_healthy
+      image:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

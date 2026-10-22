@@ -1,6 +1,6 @@
 # actionlint project config.
 # `deploy-local` is the custom label of this repo's self-hosted deploy runner
-# (see runner/README.md) — allowlist it for `runs-on` checks.
+# (see GUIDE.md Part II, the self-hosted runner) — allowlist it for `runs-on` checks.
 self-hosted-runner:
   labels:
     - deploy-local

@@ -1,47 +1,125 @@
-# CD: deploy development — started MANUALLY on `development`.
+# CD: deploy development — the LOCAL LAB environment, runner-gated.
 #
-# Trigger: workflow_dispatch only (no inputs). This workflow USED to fire
-# automatically via workflow_run when the workflow named "CI" completed on
-# branch `development`. That automatic trigger was removed for an
-# operational reason worth internalizing: the job below requires the
-# self-hosted runner (labels [self-hosted, deploy-local]) — a Mac that is
-# usually offline — so every push left the deploy QUEUED FOREVER waiting
-# for a runner that was not there. The lab now deploys deliberately:
-# runner up (`task runner-start`), then Run workflow.
+# Trigger: workflow_run when CI completes on `development` (the filter
+# matches the workflow's name: "CI"), plus manual workflow_dispatch.
 #
-# Dispatch deploys the moving `development` image tag (newest images CI
-# built), because the dispatched branch HEAD may be a paths-filtered commit
-# CI never built images for (the rollout gate would fail loudly on it —
-# ImagePullBackOff after 180s, same gate as below).
+# The lab deploys to the local docker-compose stack on the developer's Mac
+# via the self-hosted runner (labels [self-hosted, deploy-local]) — a
+# machine that is usually offline. Deploying blind meant either a job
+# queued forever (the first, automatic era) or a fully manual pipeline
+# (the dispatch-only era). This file now takes the middle road — check the
+# target BEFORE deploying:
+#   check-target (cloud, cheap) queries GitHub's runners API:
+#     runner ONLINE  -> the deploy job runs. workflow_run deploys the
+#                      exact sha CI built; dispatch deploys the moving
+#                      `development` tag (the dispatched branch HEAD may
+#                      be a commit CI never built — the pull gate below
+#                      fails loudly on it within seconds).
+#     runner OFFLINE -> the deploy job SKIPS; check-target still SUCCEEDS,
+#                      printing a loud explanation in its log (the lab
+#                      runner is offline — start it: task runner-start).
+# A manual dispatch always attempts the deploy regardless — a human
+# pressing Run workflow is expected to have started the runner.
 #
-# HISTORICAL, workflow_run era (the job below still carries its shape): the
-# 'completed' event fired on EVERY conclusion — hence the success guard in
-# the `if:` — and `github.sha` was the DEFAULT branch's commit, not the CI
-# run's, so the built commit was read from
-# `github.event.workflow_run.head_sha` (the checkout/tag expressions keep
-# the head_sha-then-github.sha fallback; under dispatch, head_sha is empty
-# and github.sha IS the dispatched ref's own commit). A manual CI dispatch
-# with skip-build=true also completed 'success' without pushing images —
-# the auto-trigger then failed at the rollout gate, visibly.
+# workflow_run gotchas this file keeps from its first automatic era:
+# 'completed' fires on EVERY conclusion — check-target treats a non-green
+# CI as "nothing to deploy" — and github.sha is the DEFAULT branch's
+# commit, not the CI run's, so the deploy reads
+# github.event.workflow_run.head_sha (dispatch runs have no payload and
+# fall back to github.sha). A manual CI dispatch with skip-build=true
+# completes 'success' without pushing images; the auto-deploy then fails
+# at the pull step, visibly, on the never-pushed tag — the accepted loud
+# failure mode.
 name: Deploy development
 
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [development]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  check-target:
+    name: check lab runner (mac-local)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Reading the repo's registered self-hosted runners via the REST API
+      # needs the actions scope — granted here, on this cheap cloud job
+      # only, not on the deploy job that touches the lab itself.
+      actions: read
+    outputs:
+      runner_online: ${{ steps.check.outputs.runner_online }}
+    steps:
+      - name: Check that the lab runner is online
+        id: check
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Empty on workflow_dispatch (no payload) — the gate below skips.
+          WORKFLOW_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -euo pipefail
+
+          # workflow_run 'completed' fires on EVERY conclusion; only green
+          # CI may deploy. Dispatch runs carry no payload — no gate.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ] && [ "$WORKFLOW_RUN_CONCLUSION" != "success" ]; then
+            echo "runner_online=false" >> "$GITHUB_OUTPUT"
+            echo "CI completed with conclusion '$WORKFLOW_RUN_CONCLUSION' — nothing to deploy."
+            exit 0
+          fi
+
+          # Is the self-hosted lab runner (mac-local) accepting jobs?
+          status="$(curl -fsS --max-time 30 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runners" \
+            | jq -r '.runners[] | select(.name == "mac-local") | .status' | head -n 1)"
+
+          if [ "$status" = "online" ]; then
+            echo "runner_online=true" >> "$GITHUB_OUTPUT"
+            echo "Lab runner 'mac-local' is ONLINE — the deploy job below will run on it."
+            exit 0
+          fi
+
+          echo "runner_online=false" >> "$GITHUB_OUTPUT"
+          cat <<'BOX'
+          ================================================================
+              DEPLOY SKIPPED — the lab runner (mac-local) is OFFLINE
+
+          This environment deploys to the LOCAL docker-compose lab that
+          runs on the developer's Mac, through the self-hosted runner
+          'mac-local' (labels: self-hosted, deploy-local). That runner is
+          OFFLINE right now, so there is no machine to deploy to — the
+          deploy job below is skipped on purpose (on an offline runner it
+          would queue forever).
+
+          To deploy the development lab:
+            1. On the Mac:  task runner-start     (idempotent)
+            2. Then:        Actions -> Deploy development -> Run workflow
+                            (branch: development)
+
+          This check job SUCCEEDS on purpose — a skip with a reason in the
+          log beats a red X that means "nothing is actually wrong".
+          ================================================================
+          BOX
+
   deploy:
     name: deploy (development)
-    # workflow_run 'completed' fires on EVERY conclusion; deploy only on green
-    # CI. Manual dispatch runs have no workflow_run payload — always deploy.
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    # Runs on the self-hosted runner that lives next to the kind cluster
-    # (label deploy-local — see runner/README.md).
+    needs: [check-target]
+    # Automatic runs deploy only when check-target saw the runner ONLINE;
+    # manual dispatch always attempts — the human is expected to have
+    # started the runner (check-target's log explains the queue if not).
+    if: needs.check-target.outputs.runner_online == 'true' || github.event_name == 'workflow_dispatch'
+    # Runs on the self-hosted runner that lives next to the Docker host the
+    # environments deploy to (label deploy-local — see GUIDE.md Part II).
     runs-on: [self-hosted, deploy-local]
     environment: development
-    # Serialize development deploys; never cancel a rollout already in flight.
+    # Serialize development deploys; never cancel a deploy already in flight.
     concurrency:
       group: deploy-development
       cancel-in-progress: false
@@ -81,13 +159,13 @@ jobs:
             echo "tag=sha-${HEAD_SHA:0:7}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Deploy development overlay
+      - name: Deploy development stack
         # Composite actions cannot read the `secrets` context — the token is
         # injected via env (stays masked in logs).
         uses: ./.github/actions/deploy-env
         env:
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
         with:
-          env: development # kustomize overlay / namespace (github-actions-development); matches the GitHub environment above
+          env: development # compose stack (file .docker/docker-compose.development.yml, project github-actions-development); matches the GitHub environment above
           image_prefix: ${{ steps.img.outputs.prefix }}
           image_tag: ${{ steps.img.outputs.tag }}
