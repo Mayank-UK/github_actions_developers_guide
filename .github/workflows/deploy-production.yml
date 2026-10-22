@@ -41,7 +41,7 @@ jobs:
         if: >-
             (
               github.event_name == 'workflow_dispatch' &&
-              github.ref == 'refs/heads/development'
+              github.ref == 'refs/heads/production'
             ) ||
             (
               github.event_name == 'workflow_run' &&
