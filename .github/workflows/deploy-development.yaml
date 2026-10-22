@@ -32,6 +32,12 @@
 # failure mode.
 name: Deploy development
 
+# One deploy-dev evaluation at a time; a newer CI completion cancels the
+# older run's evaluation (they are skip-checks — collapsing keeps the list 1:1).
+concurrency:
+  group: deploy-development
+  cancel-in-progress: true
+
 on:
   workflow_run:
     workflows: [CI]
