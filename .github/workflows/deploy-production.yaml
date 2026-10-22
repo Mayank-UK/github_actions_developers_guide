@@ -1,32 +1,43 @@
-# CD: deploy production — started MANUALLY (Run workflow) on `production`.
-#
-# USED to fire automatically on push to `production`; that trigger was
-# removed because the job requires the self-hosted runner (usually offline)
-# — every push left the deploy queued forever. Dispatch on the branch you
-# mean to promote; the tag walk below starts from the dispatched branch
-# HEAD. The `production` GitHub environment still adds its approval gate.
-#
-# Tag resolution is identical to deploy-staging.yaml, one hop deeper: CI only
-# builds+pushes on push to `development`, so the tag is resolved by DESCENDING
-# SECOND PARENTS from HEAD — the walk unwinds production<-staging<-development
-# and stops at the first commit on `development` (a plain HEAD^2 read would
-# stop at the staging MERGE commit, which CI never built).
-# => Prefer merging PRs with "Create a merge commit" (or fast-forward);
-#    squash/rebase merges leave no second parent, so the walk stops at the
-#    squash commit with a ::warning:: — which may reference images CI never
-#    built (the deploy's pull step then fails loudly on the missing tag).
-# The `production` GitHub environment (P4) adds a required-reviewer approval
-# gate before this job's steps execute.
+# CD: deploy production — THE production deployment of this repo: the
+# public guide SITE (blue/green, zero downtime), served from an Oracle VM
+# at https://githubactionsdevelopersguide.makbuilds.duckdns.org/.
+# - Green "CI" on the production branch deploys the exact commit CI just
+#   validated and published (the workflow_run trigger matches the workflow
+#   NAME "CI"); manual dispatch deploys a specified commit's sha-* GHCR
+#   images — the rollback lever (gated to the production ref).
+# - The TLS edge is the infra repo's ONE shared `caddy` container, which
+#   publishes 80/443 for the whole VM and reaches this stack's
+#   gadg_frontend_<color> container over the shared gadg_frontend network.
+#   There is deliberately NO platform stack in this variant: all four
+#   services are stateless (the guide is baked into the frontend image).
+# - Each release boots the four-service stack under the INACTIVE color's
+#   project (gadg_blue / gadg_green), is probed privately on its own
+#   app_internal network, then goes live by rewriting the flip file the
+#   shared caddy bind-mounts (platform/upstream.caddy) + a graceful
+#   `docker exec caddy caddy reload`.
+# - The live color is never touched until the new one is healthy: a
+#   pre-flip failure cleans up the failed attempt with zero impact; a
+#   post-flip failure flips back to the still-running old color (instant
+#   rollback). First-deploy failures have no fallback and report failure.
+# - The per-environment compose FILES stay as teaching artifacts: the
+#   local loopback lab (task deploy ENV=production) is unaffected — this
+#   workflow deploys the docker-compose-prod.yml stack to the VM instead.
+# - The `production` GitHub environment adds its required-reviewer
+#   approval gate before the job's steps execute (server-side).
+
 name: Deploy production
 
 on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: [production]
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Deploy this tag instead of the merge commit (e.g. sha-abcd123 or abcd123)'
-        required: false
+        description: 'Commit image tag, e.g. sha-abcd1234 or abcd1234'
+        required: true
         type: string
-        default: ''
 
 permissions:
   contents: read
@@ -34,79 +45,291 @@ permissions:
 jobs:
   deploy-production:
     name: deploy (production)
-    runs-on: [self-hosted, deploy-local]
+    runs-on: ubuntu-latest
+
+    if: >-
+      (
+        github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/production'
+      ) ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'production' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      )
+
     environment: production
-    # Serialize production deploys; never cancel a deploy already in flight.
     concurrency:
       group: deploy-production
       cancel-in-progress: false
     permissions:
       contents: read
+
     steps:
-      # Full history: the second-parent descent walks real parents and needs
-      # origin/development to exist in the checkout.
-      - name: Check out repository (full history)
+      - name: Check out repository history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/heads/production
           fetch-depth: 0
 
-      - name: Resolve image coordinates
-        id: img
+      - name: Resolve deployment commit and image tag
+        id: tag
         shell: bash
         env:
           INPUT_TAG: ${{ inputs.image_tag }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
-          # Same lowercase-owner rule as CI (GHCR requires lowercase names);
-          # tr lowercases, not a bash-4 expansion — macOS runner shell is 3.2.
-          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          echo "prefix=ghcr.io/$owner" >> "$GITHUB_OUTPUT"
+
           if [ -n "$INPUT_TAG" ]; then
-            # Manual override (workflow_dispatch): accept sha-abc1234 or bare abc1234.
             case "$INPUT_TAG" in
-              sha-*) tag="$INPUT_TAG" ;;
-              *)     tag="sha-$INPUT_TAG" ;;
+              sha-*) short="${INPUT_TAG#sha-}" ;;
+              *)     short="$INPUT_TAG" ;;
             esac
-            echo "deploy tag from dispatch input: $tag"
-          else
-            # Second-parent descent: a promotion merge's SECOND parent is the
-            # branch merged in, so walking second parents from HEAD unwinds
-            # production<-staging<-development and lands on the commit CI
-            # actually built. Stops early at any commit already on
-            # origin/development (covers fast-forward promotions AND
-            # development tips that are themselves PR merge commits — built by
-            # CI, but a blind descent would overshoot them). Fetch-depth 0
-            # (above) makes origin/development available.
-            sha="$(git rev-parse HEAD)"
-            while ! git merge-base --is-ancestor "$sha" origin/development 2>/dev/null; do
-              # rev-list prints "sha parent1 parent2": field 3 is the second
-              # parent; empty when the commit is a non-merge (or a root).
-              second="$(git rev-list --parents -n1 "$sha" | awk '{ print $3 }')"
-              if [ -z "$second" ]; then
-                break
-              fi
-              sha="$second"
-            done
-            # Cut exactly 7 chars (--short=N may emit more on ambiguous
-            # prefixes, and CI tags are always 7).
-            tag="sha-$(printf '%s' "$sha" | cut -c1-7)"
-            if ! git merge-base --is-ancestor "$sha" origin/development 2>/dev/null; then
-              # e.g. squash/rebase merge or a direct push: the resolved commit
-              # never went through development, so CI likely never built it.
-              # Deploy anyway — the pull step fails loudly if images miss.
-              echo "::warning::resolved commit $sha is NOT on development — CI only builds development pushes; images may not exist"
+
+            if [[ ! "$short" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+              echo "Invalid image tag. Supply sha- followed by a commit SHA, or a bare commit SHA." >&2
+              exit 1
             fi
-            echo "resolved deploy commit via second-parent descent: $sha"
+
+            sha="$(git rev-parse --verify "${short}^{commit}")"
+          else
+            sha="$HEAD_SHA"
+            git cat-file -e "${sha}^{commit}"
           fi
+
+          sha="$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')"
+
+          # Only deploy commits reachable from the production branch.
+          if ! git merge-base --is-ancestor "$sha" origin/production; then
+            echo "Refusing deployment: commit is not on the production history." >&2
+            exit 1
+          fi
+
+          tag="sha-$(printf '%s' "$sha" | cut -c1-7)"
+
+          echo "Deployment commit: $sha"
+          echo "Image tag: $tag"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy production stack
-        # Composite actions cannot read the `secrets` context — the token is
-        # injected via env (stays masked in logs).
-        uses: ./.github/actions/deploy-env
+      - name: Check out exact deployment commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.tag.outputs.sha }}
+          fetch-depth: 1
+
+      - name: Validate production configuration
+        run: |
+          set -euo pipefail
+          test -f .docker/docker-compose-prod.yml
+          # Bare `config -q` works because the committed .docker/.env
+          # (IMAGE_TAG=ci) auto-loads for interpolation; the merged
+          # CI pair is validated too since CI boots exactly that.
+          docker compose -f .docker/docker-compose-prod.yml config -q
+          docker compose -f .docker/docker-compose-prod.yml \
+            -f .docker/docker-compose.ci.yml config -q
+
+      - name: Prepare directories on VM
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.VM_HOST_FINGERPRINT }}
+          command_timeout: 1m
+          script: |
+            set -eu
+            # platform/ hosts ONLY the upstream.caddy flip file in
+            # this variant (no platform compose); releases/<sha>/
+            # hosts each release's app compose.
+            mkdir -p "/home/ubuntu/github_actions_developers_guide/platform"
+            mkdir -p "/home/ubuntu/github_actions_developers_guide/releases/${{ steps.tag.outputs.sha }}"
+
+      - name: Transfer release configuration
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.VM_HOST_FINGERPRINT }}
+          source: '.docker/docker-compose-prod.yml'
+          target: '/home/ubuntu/github_actions_developers_guide/releases/${{ steps.tag.outputs.sha }}'
+          # Keep the .docker/ prefix: the compose lands at
+          # releases/<sha>/.docker/docker-compose-prod.yml, and the
+          # deploy script references it there — mirroring the repo
+          # layout the file's relative comments describe.
+          strip_components: 0
+
+      - name: Deploy (blue/green)
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
+          DEPLOY_SHA: ${{ steps.tag.outputs.sha }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          GHCR_USER: ${{ secrets.GHCR_USER }}
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
         with:
-          env: production # compose stack (file .docker/docker-compose.production.yml, project github-actions-production); matches the GitHub environment above
-          image_prefix: ${{ steps.img.outputs.prefix }}
-          image_tag: ${{ steps.img.outputs.tag }}
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.VM_HOST_FINGERPRINT }}
+          envs: DEPLOY_SHA,IMAGE_TAG,GHCR_USER,GHCR_PULL_TOKEN
+          command_timeout: 10m
+          script: |
+            set -eu
+
+            ROOT="/home/ubuntu/github_actions_developers_guide"
+            RELEASE_DIR="$ROOT/releases/$DEPLOY_SHA"
+            APP_COMPOSE="$RELEASE_DIR/.docker/docker-compose-prod.yml"
+            STATE_DIR="$ROOT/.deploy"
+            STATE_FILE="$STATE_DIR/last-successful-sha"
+            COLOR_FILE="$STATE_DIR/active-color"
+            HEALTH_URL="https://githubactionsdevelopersguide.makbuilds.duckdns.org/"
+
+            test -f "$APP_COMPOSE"
+
+            mkdir -p "$STATE_DIR"
+
+            # Authenticate to GHCR without putting the token in command arguments.
+            printf '%s' "$GHCR_PULL_TOKEN" |
+              docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+            export IMAGE_TAG
+
+            # Read the last successful release, if one exists.
+            PREVIOUS_SHA=""
+            if [ -s "$STATE_FILE" ]; then
+              PREVIOUS_SHA="$(cat "$STATE_FILE")"
+              if ! printf '%s' "$PREVIOUS_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+                echo "The saved previous-release SHA is invalid; refusing deployment." >&2
+                exit 1
+              fi
+            fi
+
+            # ── 1. Shared infrastructure: the external frontend net ────
+            docker network create gadg_frontend 2>/dev/null || true
+
+            # ── 2. Active color ─────────────────────────────────────────
+            HAD_ACTIVE_COLOR=0
+            ACTIVE_COLOR=""
+            if [ -s "$COLOR_FILE" ]; then
+              ACTIVE_COLOR="$(cat "$COLOR_FILE")"
+              if [ "$ACTIVE_COLOR" != "blue" ] && [ "$ACTIVE_COLOR" != "green" ]; then
+                echo "The saved active color is invalid; refusing deployment." >&2
+                exit 1
+              fi
+              HAD_ACTIVE_COLOR=1
+            fi
+            # First deploy targets blue; the shared caddy's
+            # upstream then 502s (nothing is live yet) until the
+            # flip below.
+            ACTIVE_COLOR="${ACTIVE_COLOR:-blue}"
+
+            # Ensure the flip file EXISTS, pointing at the color
+            # that should keep serving (a no-op rewrite on normal
+            # deploys) — the shared caddy bind-mounts it read-only
+            # and the flip step below rewrites it in place.
+            printf 'reverse_proxy gadg_frontend_%s:80\n' "$ACTIVE_COLOR" \
+              > "$ROOT/platform/upstream.caddy"
+
+            # ── 3. Pick the inactive color; boot it ────────────────────
+            if [ "$HAD_ACTIVE_COLOR" -eq 1 ]; then
+              if [ "$ACTIVE_COLOR" = "blue" ]; then COLOR="green"; else COLOR="blue"; fi
+            else
+              COLOR="blue"
+            fi
+            export COLOR
+
+            echo "Deploying GHCR release $IMAGE_TAG as color $COLOR"
+            docker compose -p "gadg_$COLOR" -f "$APP_COMPOSE" pull
+            docker compose -p "gadg_$COLOR" -f "$APP_COMPOSE" up -d --no-build --wait
+
+            # ── 4. Probe the new color privately (belt over --wait) ────
+            # The app_internal network is project-scoped, so this
+            # color's containers are reachable BY NAME from any
+            # container that joins it — and ONLY this color's are.
+            COLOR_NET="gadg_${COLOR}_app_internal"
+            docker network inspect "$COLOR_NET" >/dev/null
+
+            probe_new_color() {
+              docker run --rm --network "$COLOR_NET" busybox:stable \
+                wget -qO- --timeout=10 "$1" >/dev/null
+            }
+
+            # Front door + one real backend through the same
+            # network (nginx's own proxy chain is exercised by the
+            # public gate after the flip).
+            if ! probe_new_color "http://gadg_frontend_${COLOR}:80/" ||
+               ! probe_new_color "http://gadg_counter_${COLOR}:3000/health"; then
+              # ── 5. Pre-flip failure: the live color was never touched.
+              echo "New color $COLOR failed its private probe; cleaning it up." >&2
+              docker compose -p "gadg_$COLOR" -f "$APP_COMPOSE" down --remove-orphans
+              exit 1
+            fi
+
+            # ── 6. Flip: upstream file + reload the shared caddy ────────
+            printf 'reverse_proxy gadg_frontend_%s:80\n' "$COLOR" \
+              > "$ROOT/platform/upstream.caddy"
+            docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+            wait_for_health() {
+              attempt=1
+              while [ "$attempt" -le 12 ]; do
+                if curl -fsS --max-time 10 "$HEALTH_URL" >/dev/null; then
+                  return 0
+                fi
+                if [ "$attempt" -lt 12 ]; then
+                  sleep 5
+                fi
+                attempt=$((attempt + 1))
+              done
+              return 1
+            }
+
+            # ── 7. Public health gate ───────────────────────────────────
+            if wait_for_health; then
+              # ── 8. Success: persist state atomically, retire the old
+              # color, prune old release dirs (keep the newest 5,
+              # never the active or previous sha).
+              printf '%s\n' "$DEPLOY_SHA" > "$STATE_FILE.tmp"
+              mv "$STATE_FILE.tmp" "$STATE_FILE"
+              printf '%s\n' "$COLOR" > "$COLOR_FILE.tmp"
+              mv "$COLOR_FILE.tmp" "$COLOR_FILE"
+
+              if [ "$COLOR" = "blue" ]; then OTHER="green"; else OTHER="blue"; fi
+              docker compose -p "gadg_$OTHER" -f "$APP_COMPOSE" down --remove-orphans
+
+              cd "$ROOT/releases"
+              ls -t | tail -n +6 | while read -r dir; do
+                if [ "$dir" != "$DEPLOY_SHA" ] && [ "$dir" != "$PREVIOUS_SHA" ]; then
+                  rm -rf "$ROOT/releases/$dir"
+                  echo "Pruned old release directory: $dir"
+                fi
+              done
+
+              echo "Deployment succeeded: $DEPLOY_SHA (active color: $COLOR)"
+              exit 0
+            fi
+
+            # ── 9. Post-flip failure: instant rollback ──────────────────
+            echo "Public health check failed after the flip: $DEPLOY_SHA" >&2
+
+            if [ "$HAD_ACTIVE_COLOR" -eq 1 ]; then
+              echo "Flipping back to the still-running color $ACTIVE_COLOR." >&2
+              printf 'reverse_proxy gadg_frontend_%s:80\n' "$ACTIVE_COLOR" \
+                > "$ROOT/platform/upstream.caddy"
+              docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+              if wait_for_health; then
+                echo "Rollback succeeded: $ACTIVE_COLOR is serving again." >&2
+              else
+                echo "Rollback verification failed; manual intervention is required." >&2
+              fi
+              docker compose -p "gadg_$COLOR" -f "$APP_COMPOSE" down --remove-orphans
+              echo "The failed deployment remains marked as failed." >&2
+              exit 1
+            fi
+
+            echo "No previous successful release exists. No rollback attempted." >&2
+            exit 1

@@ -1,15 +1,25 @@
-# CD: deploy staging — started MANUALLY (Run workflow) on `staging`.
+# CD: deploy staging — the LOCAL LAB environment, runner-gated.
 #
-# USED to fire automatically on push to `staging`; that trigger was removed
-# because the job requires the self-hosted runner (usually offline) — every
-# push left the deploy queued forever. Dispatch on the branch you mean to
-# promote; the tag walk below starts from the dispatched branch HEAD.
+# Trigger: workflow_dispatch (Run workflow on `staging`), plus a
+# workflow_run trigger on CI completing on `staging` that is currently
+# DORMANT by construction: CI only runs on pushes to development and
+# production (and PRs), so nothing today completes a CI run on a staging
+# ref. It is declared anyway so the day CI grows a staging trigger, this
+# deploy gates on it exactly like Deploy development does.
+#
+# Dispatch deploys deliberately: the lab's self-hosted runner (labels
+# [self-hosted, deploy-local]) is usually offline, so a push-triggered
+# deploy job would queue forever. The check-target job (cloud, cheap)
+# queries GitHub's runners API first and prints a loud explanation when
+# the runner is offline; the deploy job itself runs whenever check-target
+# saw the runner ONLINE or the run is a manual dispatch (the human is
+# expected to have started the runner).
 #
 # WHICH images get deployed: CI only builds+pushes on push to `development`
-# (tags sha-<7> + dev). This workflow resolves the tag by DESCENDING SECOND
-# PARENTS from HEAD: a promotion merge's second parent is the branch merged
-# in, so the walk unwinds staging<-development and stops at the first commit
-# on `development` — the one CI built.
+# (tags sha-<7> + development). This workflow resolves the tag by DESCENDING
+# SECOND PARENTS from HEAD: a promotion merge's second parent is the branch
+# merged in, so the walk unwinds staging<-development and stops at the first
+# commit on `development` — the one CI built.
 # => Prefer merging PRs with "Create a merge commit" (or fast-forward);
 #    squash/rebase merges leave no second parent, so the walk stops at the
 #    squash commit with a ::warning:: — which may reference images CI never
@@ -17,6 +27,10 @@
 name: Deploy staging
 
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [staging]
   workflow_dispatch:
     inputs:
       image_tag:
@@ -29,8 +43,78 @@ permissions:
   contents: read
 
 jobs:
+  check-target:
+    name: check lab runner (mac-local)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Reading the repo's registered self-hosted runners via the REST API
+      # needs the actions scope — granted here, on this cheap cloud job
+      # only, not on the deploy job that touches the lab itself.
+      actions: read
+    outputs:
+      runner_online: ${{ steps.check.outputs.runner_online }}
+    steps:
+      - name: Check that the lab runner is online
+        id: check
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Empty on workflow_dispatch (no payload) — the gate below skips.
+          WORKFLOW_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -euo pipefail
+
+          # workflow_run 'completed' fires on EVERY conclusion; only green
+          # CI may deploy. Dispatch runs carry no payload — no gate.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ] && [ "$WORKFLOW_RUN_CONCLUSION" != "success" ]; then
+            echo "runner_online=false" >> "$GITHUB_OUTPUT"
+            echo "CI completed with conclusion '$WORKFLOW_RUN_CONCLUSION' — nothing to deploy."
+            exit 0
+          fi
+
+          # Is the self-hosted lab runner (mac-local) accepting jobs?
+          status="$(curl -fsS --max-time 30 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runners" \
+            | jq -r '.runners[] | select(.name == "mac-local") | .status' | head -n 1)"
+
+          if [ "$status" = "online" ]; then
+            echo "runner_online=true" >> "$GITHUB_OUTPUT"
+            echo "Lab runner 'mac-local' is ONLINE — the deploy job below will run on it."
+            exit 0
+          fi
+
+          echo "runner_online=false" >> "$GITHUB_OUTPUT"
+          cat <<'BOX'
+          ================================================================
+              DEPLOY SKIPPED — the lab runner (mac-local) is OFFLINE
+
+          This environment deploys to the LOCAL docker-compose lab that
+          runs on the developer's Mac, through the self-hosted runner
+          'mac-local' (labels: self-hosted, deploy-local). That runner is
+          OFFLINE right now, so there is no machine to deploy to — the
+          deploy job below is skipped on purpose (on an offline runner it
+          would queue forever).
+
+          To deploy the staging lab:
+            1. On the Mac:  task runner-start     (idempotent)
+            2. Then:        Actions -> Deploy staging -> Run workflow
+                            (branch: staging)
+
+          This check job SUCCEEDS on purpose — a skip with a reason in the
+          log beats a red X that means "nothing is actually wrong".
+          ================================================================
+          BOX
+
   deploy-staging:
     name: deploy (staging)
+    needs: [check-target]
+    # Automatic runs deploy only when check-target saw the runner ONLINE;
+    # manual dispatch always attempts — the human is expected to have
+    # started the runner (check-target's log explains the queue if not).
+    if: needs.check-target.outputs.runner_online == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, deploy-local]
     environment: staging
     # Serialize staging deploys; never cancel a deploy already in flight.
