@@ -116,8 +116,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Render compose stack
         # docker compose config interpolates and merges the file into the
-        # final stack definition — the deploy-side equivalent of `kubectl
-        # kustomize`, on the preinstalled docker CLI of ubuntu-latest.
+        # final stack definition — a cheap "is the deploy config valid"
+        # check, on the preinstalled docker CLI of ubuntu-latest.
         run: |
           set -euo pipefail
           out="$(docker compose -f .docker/docker-compose.${{ matrix.env }}.yml config)"

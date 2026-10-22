@@ -1,8 +1,8 @@
 name: deploy-env
 description: >-
-  Deploy all four services to one environment namespace: rotate the ghcr-pull
-  imagePullSecret, point the overlay at the CI-built images (kustomize edit
-  set image), apply the overlay, then gate on all four rollouts.
+  Deploy all four services to one environment stack: docker login to GHCR
+  with the pull token, pull the CI-built images, docker compose up -d --wait
+  (health-gated), smoke-test the published port, then log out again.
 
 # Secrets: composite actions CANNOT read the `secrets` context, so the caller
 # injects the GHCR pull token via env (secret values passed through env stay
@@ -15,12 +15,12 @@ description: >-
   #       env: development
   #       ...
 #
-# Requires on the runner host: kubectl 1.36.x, kustomize 5.x, git
-# (see runner/README.md).
+# Requires on the runner host: docker (with the compose plugin), git — see
+# the runner section of GUIDE.md.
 
 inputs:
   env:
-    description: 'Target environment: development | staging | production (namespace github-actions-<env>, overlay .k8s/overlays/<env>)'
+    description: 'Target environment: development | staging | production (compose file .docker/docker-compose.<env>.yml, project github-actions-<env>)'
     required: true
   image_prefix:
     description: 'Registry path prefix of the CI-built images, e.g. ghcr.io/mayank-uk (the prefix also supplies the GHCR pull username)'
@@ -32,28 +32,27 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Rotate ghcr-pull imagePullSecret
-      # create --dry-run=client | apply = idempotent create-or-update: safe to
-      # re-run every deploy, and the way the token gets rotated cluster-side.
+    - name: Log in to GHCR (pull token)
+      # The images live in private GHCR; the Docker daemon needs credentials
+      # to pull them. The token follows the same env-injection pattern the
+      # caller uses for every secret (composite actions cannot read
+      # `secrets`); --password-stdin keeps it out of argv and logs. The
+      # final step logs out again (the self-hosted runner persists between
+      # jobs).
       shell: bash
       env:
-        DEPLOY_ENV: ${{ inputs.env }}
         IMAGE_PREFIX: ${{ inputs.image_prefix }}
       run: |
         set -euo pipefail
         : "${GHCR_PULL_TOKEN:?GHCR_PULL_TOKEN is not set — the caller must pass it via env from secrets.GHCR_PULL_TOKEN}"
         owner="${IMAGE_PREFIX##*/}"
-        kubectl create secret docker-registry ghcr-pull \
-          --docker-server=ghcr.io \
-          --docker-username="$owner" \
-          --docker-password="$GHCR_PULL_TOKEN" \
-          -n "github-actions-$DEPLOY_ENV" \
-          --dry-run=client -o yaml | kubectl apply -f -
+        printf '%s' "$GHCR_PULL_TOKEN" | docker login ghcr.io --username "$owner" --password-stdin
 
-    - name: Point overlay at the built images
-      # Runner checkout is ephemeral, so editing the overlay in the working
-      # tree (never committed) is the simplest GitOps-lite image override:
-      # overlay image entries override the base's local p0 tags by name.
+    - name: Pull the stack's images
+      # Pull BEFORE `up`: a tag that was never pushed fails HERE, loudly and
+      # within seconds, while the running stack keeps serving untouched —
+      # the deploy fails fast instead of tearing down containers it cannot
+      # replace.
       shell: bash
       env:
         DEPLOY_ENV: ${{ inputs.env }}
@@ -61,32 +60,45 @@ runs:
         IMAGE_TAG: ${{ inputs.image_tag }}
       run: |
         set -euo pipefail
-        for svc in facts counter image frontend; do
-          (
-            cd ".k8s/overlays/$DEPLOY_ENV"
-            kustomize edit set image "github-actions/$svc=$IMAGE_PREFIX/github-actions-$svc:$IMAGE_TAG"
-          )
-        done
+        export IMG_PREFIX="$IMAGE_PREFIX" IMG_TAG="$IMAGE_TAG"
+        docker compose --file ".docker/docker-compose.$DEPLOY_ENV.yml" pull
 
-    - name: Apply overlay
+    - name: Deploy (recreate + wait healthy)
+      # up -d recreates only containers whose image/config changed, then
+      # --wait blocks until every service reports healthy (compose runs the
+      # healthchecks from the compose file). This is the deploy gate: a
+      # container that crashloops or never turns healthy fails the job
+      # instead of leaving a half-dead stack behind.
+      shell: bash
+      env:
+        DEPLOY_ENV: ${{ inputs.env }}
+        IMAGE_PREFIX: ${{ inputs.image_prefix }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+      run: |
+        set -euo pipefail
+        export IMG_PREFIX="$IMAGE_PREFIX" IMG_TAG="$IMAGE_TAG"
+        docker compose --file ".docker/docker-compose.$DEPLOY_ENV.yml" up -d --wait
+
+    - name: Smoke-test the stack
+      # The user-facing gate: the compose file publishes one frontend port
+      # per environment — prove the deployed stack actually answers on it.
       shell: bash
       env:
         DEPLOY_ENV: ${{ inputs.env }}
       run: |
         set -euo pipefail
-        kubectl apply -k ".k8s/overlays/$DEPLOY_ENV"
-
-    - name: Gate on rollouts
-      # Fails the job if any of the four deployments does not roll out within
-      # 180s (e.g. ImagePullBackOff from a tag that was never pushed).
-      shell: bash
-      env:
-        DEPLOY_ENV: ${{ inputs.env }}
-      run: |
-        set -euo pipefail
-        for svc in facts counter image frontend; do
-          kubectl rollout status "deployment/$svc" -n "github-actions-$DEPLOY_ENV" --timeout=180s
-        done
+        case "$DEPLOY_ENV" in
+          development) port=8080 ;;
+          staging)     port=8081 ;;
+          production)  port=8082 ;;
+          *) echo "unknown environment: $DEPLOY_ENV" >&2; exit 1 ;;
+        esac
+        code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/")"
+        echo "$DEPLOY_ENV frontend (port $port) -> HTTP $code"
+        [ "$code" = "200" ] || { echo "FAIL: $DEPLOY_ENV frontend not 200"; exit 1; }
+        body="$(curl -sf "http://127.0.0.1:$port/api/facts?topic=rocket")"
+        echo "$body" | grep -q '"facts"' || { echo "FAIL: /api/facts did not return facts JSON"; exit 1; }
+        echo "$DEPLOY_ENV /api/facts -> $(printf '%s' "$body" | head -c 120)"
 
     - name: Deploy summary
       shell: bash
@@ -101,3 +113,12 @@ runs:
           echo "github-actions-$svc -> $IMAGE_PREFIX/github-actions-$svc:$IMAGE_TAG"
         done
         echo "::endgroup::"
+
+    - name: Log out of GHCR
+      # if: always() — hygiene must run even when a deploy step failed: the
+      # self-hosted runner persists between jobs, and a left-behind registry
+      # login would outlive the job that created it.
+      if: always()
+      shell: bash
+      run: |
+        docker logout ghcr.io

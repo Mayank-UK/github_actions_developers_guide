@@ -41,7 +41,7 @@ jobs:
     # environments deploy to (label deploy-local — see GUIDE.md Part II).
     runs-on: [self-hosted, deploy-local]
     environment: development
-    # Serialize development deploys; never cancel a rollout already in flight.
+    # Serialize development deploys; never cancel a deploy already in flight.
     concurrency:
       group: deploy-development
       cancel-in-progress: false

@@ -33,7 +33,7 @@ jobs:
     name: deploy (staging)
     runs-on: [self-hosted, deploy-local]
     environment: staging
-    # Serialize staging deploys; never cancel a rollout already in flight.
+    # Serialize staging deploys; never cancel a deploy already in flight.
     concurrency:
       group: deploy-staging
       cancel-in-progress: false

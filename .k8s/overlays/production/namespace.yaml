@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: github-actions-production
-  labels:
-    app.kubernetes.io/part-of: github-actions

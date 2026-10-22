@@ -36,7 +36,7 @@ jobs:
     name: deploy (production)
     runs-on: [self-hosted, deploy-local]
     environment: production
-    # Serialize production deploys; never cancel a rollout already in flight.
+    # Serialize production deploys; never cancel a deploy already in flight.
     concurrency:
       group: deploy-production
       cancel-in-progress: false

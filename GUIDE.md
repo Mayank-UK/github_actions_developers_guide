@@ -2,8 +2,8 @@
 
 This is the teaching guide for the **github_actions** CI/CD lab: a real
 application (four microservices), a real CI pipeline running on GitHub's cloud
-runners, and a real CD pipeline deploying to a Kubernetes (kind) cluster on a
-Mac through a self-hosted runner. Everything you will read about GitHub Actions
+runners, and a real CD pipeline deploying docker compose stacks on a Mac
+through a self-hosted runner. Everything you will read about GitHub Actions
 here is *demonstrated by files in this repository* — the code is the source of
 truth.
 
@@ -35,8 +35,8 @@ The guide has two parts:
   pedagogically, each grounded in this repo (or honestly marked as
   concept-only).
 - **Part II — The Project**: this repository's architecture, every workflow
-  explained section by section, the Kubernetes side, the runner, and how a
-  commit travels from `git push` to a running pod.
+  explained section by section, the deployment side, the runner, and how a
+  commit travels from `git push` to a running container.
 
 ---
 
@@ -55,33 +55,29 @@ Its own description says it best:
 <!-- source: Taskfile.yml -->
 ```yaml
   up:
-    desc: Full bootstrap — the "resume after reboot (or 2 years later)" one-shot. Docker check, kind cluster (start stopped nodes, or create+ingress), runner check, overlays only if namespaces missing, then smoke.
+    desc: Full bootstrap — the "resume after reboot (or 2 years later)" one-shot. Docker check, bring each environment stack up (no-op when already running; starts stopped containers), runner check, then smoke.
 ```
 
 In order: it checks Docker Desktop is up (and tells you to start it if not),
-starts the stopped kind node containers (or creates the cluster + ingress
-from scratch if the cluster is gone), *checks* the self-hosted runner — if
-it is not running it prints exactly how to start it (`task runner-start`) —
-re-applies any missing environment overlays, and finishes with a smoke test
-of all three environments. Run it after every reboot and you are back in
-business. Run `task runner-start` too if `task up` reported the runner down.
+brings each of the three environment stacks up (`docker compose up -d --wait`
+— a no-op for stacks that never stopped, a restarter for those that did, and
+health-gated either way), *checks* the self-hosted runner — if it is not
+running it prints exactly how to start it (`task runner-start`) — and finishes
+with a smoke test of all three environments. Run it after every reboot and you
+are back in business. Run `task runner-start` too if `task up` reported the
+runner down.
 
-For browser access, run once (adds the three hostnames to `/etc/hosts`):
+(On a fresh clone the stacks have no local images yet — `task deploy-all`
+builds them first, then brings up all three environments.)
 
-<!-- concept -->
-```console
-$ task hosts
-```
+Each environment is one docker compose project publishing the frontend on its
+own loopback port — no hostnames, no `/etc/hosts` edits:
 
-(curl-based smoke tests do not need this — they use `--resolve`.)
-
-Then the lab is reachable at:
-
-| Environment | URL |
-|---|---|
-| development | http://development.github-actions.test:8080 |
-| staging | http://staging.github-actions.test:8080 |
-| production | http://production.github-actions.test:8080 |
+| Environment | URL | Compose project |
+|---|---|---|
+| development | http://localhost:8080 | github-actions-development |
+| staging | http://localhost:8081 | github-actions-staging |
+| production | http://localhost:8082 | github-actions-production |
 
 Each URL serves this guide (rendered client-side by the frontend container)
 and proxies the three live APIs:
@@ -98,9 +94,9 @@ description + counts). Your browser only makes two requests (facts, image,
 in parallel) — the counts arrive ready inside the facts response because the
 facts service called counter for you.
 
-The other tasks you will see in this guide (`task cluster-create`,
-`task ingress`, `task build`, `task deploy`, `task smoke`, `task pull-secret`,
-`task guide-check`, …) are the building blocks `task up` orchestrates — they
+The other tasks you will see in this guide (`task build`, `task deploy`,
+`task deploy-all`, `task down`, `task smoke`, `task guide-check`, …) are the
+building blocks `task up` orchestrates — they
 are documented in [Part II](#part-ii--the-project) with their real
 definitions.
 
@@ -274,7 +270,6 @@ on:
     paths:
       - 'app/**'
       - '.docker/**'
-      - '.k8s/**'
       - 'GUIDE.md'
       - 'scripts/**'
       - '.github/workflows/ci.yaml'
@@ -283,7 +278,6 @@ on:
     paths:
       - 'app/**'
       - '.docker/**'
-      - '.k8s/**'
       - 'GUIDE.md'
       - 'scripts/**'
       - '.github/workflows/ci.yaml'
@@ -321,7 +315,6 @@ The CI workflow filters pushes to one branch AND to six path prefixes:
     paths:
       - 'app/**'
       - '.docker/**'
-      - '.k8s/**'
       - 'GUIDE.md'
       - 'scripts/**'
       - '.github/workflows/ci.yaml'
@@ -443,7 +436,7 @@ graph (DAG). If a `needs` job fails, dependent jobs are *skipped* (not
 failed).
 
 CI's build job waits on two jobs — the three-way language test matrix and the
-kustomize render matrix (both are fan-outs: one job name, several parallel
+compose render matrix (both are fan-outs: one job name, several parallel
 instances; §18):
 
 <!-- source: .github/workflows/ci.yaml -->
@@ -513,8 +506,8 @@ and streams logs back. It persists between jobs (unlike GitHub-hosted), can
 reach your LAN/localhost, and costs no Actions minutes.
 
 That persistence and reach are exactly why this project needs one: deploys
-must run `kubectl` against the kind cluster, which only exists on the Mac
-itself. The deploy jobs therefore target the Mac:
+must run `docker compose` against the Mac's Docker daemon, which only the Mac
+itself can reach. The deploy jobs therefore target the Mac:
 
 <!-- source: .github/workflows/deploy-development.yaml -->
 ```yaml
@@ -538,8 +531,8 @@ arbitrary code execution on the machine. The safe rules this project follows:
   branches — code a maintainer already merged, which a human then chose to
   deploy.
 - **Least-privilege token on the runner** (§20) and **no secrets on the
-  runner machine** — the pull token arrives per-job via env and is rotated
-  into the cluster on every deploy (Part II).
+  runner machine** — the pull token arrives per-job via env, is used for one
+  `docker login`, and is logged out again before the job ends (Part II).
 
 **In the GitHub UI:** repo → **Settings → Actions → Runners** (org-level:
 Settings → Actions → Runner groups): lists runners with status
@@ -876,7 +869,7 @@ fan-out without copy-paste. The CI workflow uses it twice: three languages…
         service: [facts, counter, image]
 ```
 
-…and three kustomize environments, and four build-push services:
+…and three compose environments, and four build-push services:
 
 <!-- source: .github/workflows/ci.yaml -->
 ```yaml
@@ -928,11 +921,11 @@ The group name embeds `github.ref`, so development pushes and each PR form
 *separate* groups — you never cancel someone else's PR check.
 
 Deploys want the opposite — **serialized, never cancelled** (killing a
-kubectl apply mid-rollout is how you get half-updated clusters):
+deploy mid-recreate is how you get half-updated stacks):
 
 <!-- source: .github/workflows/deploy-development.yaml -->
 ```yaml
-    # Serialize development deploys; never cancel a rollout already in flight.
+    # Serialize development deploys; never cancel a deploy already in flight.
     concurrency:
       group: deploy-development
       cancel-in-progress: false
@@ -1037,30 +1030,30 @@ Two repo-level stores, one encrypted, one not:
 
 This project has exactly one secret: `GHCR_PULL_TOKEN`, a classic PAT with
 `read:packages`. Why a PAT at all when `github.token` can push? Because the
-*cluster* (the Mac's kubelet) needs to pull images long after the CI job —
-and its token — died. The job hands the secret to the composite action via
-step env (composite actions can't read the `secrets` context — §25):
+*deploy* (the Mac's Docker daemon, hours or days after the CI job — and its
+token — died) needs to pull the private images from GHCR. The job hands the
+secret to the composite action via step env (composite actions can't read the
+`secrets` context — §25):
 
 <!-- source: .github/workflows/deploy-development.yaml -->
 ```yaml
-      - name: Deploy development overlay
+      - name: Deploy development stack
         # Composite actions cannot read the `secrets` context — the token is
         # injected via env (stays masked in logs).
         uses: ./.github/actions/deploy-env
         env:
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
         with:
-          env: development # kustomize overlay / namespace (github-actions-development); matches the GitHub environment above
+          env: development # compose stack (file .docker/docker-compose.development.yml, project github-actions-development); matches the GitHub environment above
           image_prefix: ${{ steps.img.outputs.prefix }}
           image_tag: ${{ steps.img.outputs.tag }}
 ```
 
 Masking notes: the mask covers the value anywhere it would print (even
 accidentally echoed inside scripts); values of ~short length and common words
-mask poorly; and masking never happens for values written to files (the
-kubernetes secret the deploy creates holds the token in base64 — which is
-encoding, not encryption; that's normal for k8s Secrets and fine here since
-the cluster is local).
+mask poorly; and masking never happens for values written to files — which is
+why the deploy's `docker login` reads the token from stdin (never argv, never
+a file) and logs out again before the job ends (Part II).
 
 Scopes for both secrets and variables: **repository**, **environment**
 (scoped to runs targeting that environment — this project's pattern for
@@ -1105,10 +1098,11 @@ Combined with §19's serialized concurrency, production changes are
 one-at-a-time, human-initiated, and human-approved.
 
 Environment names are free-form strings — but the convention here binds four
-things under one name: the GitHub environment, the kustomize overlay
-directory, the Kubernetes namespace, and the ingress hostname (all
-`development`/`staging`/`production` — see Part II). That string is the
-thread you can pull from a URL all the way back to a workflow file.
+things under one name: the GitHub environment, the compose file
+(`.docker/docker-compose.<env>.yml`), the compose project
+(`github-actions-<env>`), and the published frontend port (8080/8081/8082 —
+see Part II). That string is the thread you can pull from a URL all the way
+back to a workflow file.
 
 **In the GitHub UI:** repo → **Settings → Environments** — create/inspect
 each environment, add protection rules ("Required reviewers" with a list of
@@ -1237,8 +1231,8 @@ container actions (§27), plus reusable *workflows* (§26). The **composite
 action** is the simplest: a directory with an `action.yaml` whose steps are
 plain `run:` scripts (each choosing its own `shell:`), plus declared `inputs:`
 and `outputs:`. It runs *inline* in the calling job — same runner, same
-filesystem, same env — so it can use anything on the runner (here: kubectl,
-kustomize, git).
+filesystem, same env — so it can use anything on the runner (here: docker,
+git).
 
 This repo ships one — `.github/actions/deploy-env` — and all three deploy
 workflows call it. Its interface is deliberately **secret-free**: three plain
@@ -1249,9 +1243,9 @@ with the token injected by the caller via step env (§21). The header:
 ```yaml
 name: deploy-env
 description: >-
-  Deploy all four services to one environment namespace: rotate the ghcr-pull
-  imagePullSecret, point the overlay at the CI-built images (kustomize edit
-  set image), apply the overlay, then gate on all four rollouts.
+  Deploy all four services to one environment stack: docker login to GHCR
+  with the pull token, pull the CI-built images, docker compose up -d --wait
+  (health-gated), smoke-test the published port, then log out again.
 ```
 
 Inputs are typed by description + `required`:
@@ -1260,7 +1254,7 @@ Inputs are typed by description + `required`:
 ```yaml
 inputs:
   env:
-    description: 'Target environment: development | staging | production (namespace github-actions-<env>, overlay .k8s/overlays/<env>)'
+    description: 'Target environment: development | staging | production (compose file .docker/docker-compose.<env>.yml, project github-actions-<env>)'
     required: true
   image_prefix:
     description: 'Registry path prefix of the CI-built images, e.g. ghcr.io/mayank-uk (the prefix also supplies the GHCR pull username)'
@@ -1277,7 +1271,7 @@ The composite marker and step structure:
 runs:
   using: composite
   steps:
-    - name: Rotate ghcr-pull imagePullSecret
+    - name: Log in to GHCR (pull token)
 ```
 
 Inside, every step reads inputs through the `inputs` context (§16) and fails
@@ -1287,26 +1281,21 @@ loudly on the missing token with a POSIX `:?` guard:
 ```yaml
       shell: bash
       env:
-        DEPLOY_ENV: ${{ inputs.env }}
         IMAGE_PREFIX: ${{ inputs.image_prefix }}
       run: |
         set -euo pipefail
         : "${GHCR_PULL_TOKEN:?GHCR_PULL_TOKEN is not set — the caller must pass it via env from secrets.GHCR_PULL_TOKEN}"
         owner="${IMAGE_PREFIX##*/}"
-        kubectl create secret docker-registry ghcr-pull \
-          --docker-server=ghcr.io \
-          --docker-username="$owner" \
-          --docker-password="$GHCR_PULL_TOKEN" \
-          -n "github-actions-$DEPLOY_ENV" \
-          --dry-run=client -o yaml | kubectl apply -f -
+        printf '%s' "$GHCR_PULL_TOKEN" | docker login ghcr.io --username "$owner" --password-stdin
 ```
 
 Why the env-injection dance instead of just using `secrets.`? (a) composite
 actions genuinely cannot — the context is unavailable to them; (b) it keeps
 the action usable from *any* caller (each supplies its own token); (c) env-
-passed secrets stay masked in logs, and the `:?` guard turns a forgotten
-injection into an instant, self-documenting failure instead of an empty
-docker-username deployed to the cluster.
+passed secrets stay masked in logs, `--password-stdin` keeps the value out of
+process listings, and the `:?` guard turns a forgotten injection into an
+instant, self-documenting failure instead of an anonymous `docker login`
+that never happened.
 
 A composite action's steps get their own log sections in the caller's job —
 indistinguishable from native steps.
@@ -1514,13 +1503,13 @@ The composite action wraps its deploy summary in a group:
         echo "::endgroup::"
 ```
 
-The render job turns an empty kustomize output into a hard, annotated error:
+The render job turns an empty compose render into a hard, annotated error:
 
 <!-- source: .github/workflows/ci.yaml -->
 ```yaml
-          out="$(kubectl kustomize .k8s/overlays/${{ matrix.env }})"
+          out="$(docker compose -f .docker/docker-compose.${{ matrix.env }}.yml config)"
           if [ -z "$out" ]; then
-            echo "::error::.k8s/overlays/${{ matrix.env }} rendered to EMPTY output"
+            echo "::error::docker-compose.${{ matrix.env }}.yml rendered to EMPTY output"
             exit 1
           fi
 ```
@@ -1644,9 +1633,9 @@ the API services build from their `app/` subdirectories), `platforms:`,
           cache-to: type=gha,mode=max
 ```
 
-Why arm64 is *required* here, not a nice-to-have: the deploy target is a
-kind cluster on an Apple-silicon Mac — its nodes are arm64; an amd64-only
-image would crashloop on the cluster with the classic `exec format error`.
+Why arm64 is *required* here, not a nice-to-have: the deploy target is the
+Apple-silicon Mac's own Docker daemon — its containers are arm64; an amd64-only
+image would crashloop on the stack with the classic `exec format error`.
 (QEMU's emulation is also a known flake source.)
 
 The tags encode the deployment model: `sha-<7>` is immutable and is what CD
@@ -1692,11 +1681,10 @@ author chose an honest simplification, recorded in the file:
 ```yaml
     # Union of paths needed by ALL jobs (GitHub workflows do not support YAML
     # anchors, so the list is duplicated below). test-matrix also runs on
-    # .k8s-only changes — accepted for simplicity instead of per-job path gating.
+    # compose-only changes — accepted for simplicity instead of per-job path gating.
     paths:
       - 'app/**'
       - '.docker/**'
-      - '.k8s/**'
       - '.github/workflows/ci.yaml'
 ```
 
@@ -1705,39 +1693,35 @@ not-skipped jobs in the run.
 
 ## 33. Pattern: GitOps vs push-deploy
 
-Two philosophies for "how code reaches the cluster":
+Two philosophies for "how code reaches the deployment target":
 
 - **Push-deploy (this project)** — the CI/CD pipeline *pushes* to the
-  cluster: here a deploy job runs `kustomize edit set image` + `kubectl
-  apply -k` on a runner that sits next to the cluster. Simple, explicit,
+  target: here a deploy job runs `docker compose pull` + `docker compose up
+  -d --wait` on a runner that sits next to the Docker host. Simple, explicit,
   everything in one place (the workflow file is the whole truth), and a
   perfect fit for a lab. The push's own words:
 
 <!-- source: .github/actions/deploy-env/action.yaml -->
 ```yaml
-        for svc in facts counter image frontend; do
-          (
-            cd ".k8s/overlays/$DEPLOY_ENV"
-            kustomize edit set image "github-actions/$svc=$IMAGE_PREFIX/github-actions-$svc:$IMAGE_TAG"
-          )
-        done
+        export IMG_PREFIX="$IMAGE_PREFIX" IMG_TAG="$IMAGE_TAG"
+        docker compose --file ".docker/docker-compose.$DEPLOY_ENV.yml" pull
 ```
 
-- **GitOps (concept)** — the cluster *pulls*: a controller inside the
-  cluster (Argo CD, Flux) watches a git repo (or registry) declared to be
-  the desired state and reconciles the cluster toward it. Deploy = git
-  commit; rollback = git revert; audit = git log; and nothing outside the
-  cluster needs credentials to change it. The cost: another system running
-  in-cluster, and drift-by-hand becomes a fought-over anti-pattern.
+- **GitOps (concept)** — the target *pulls*: a controller (Argo CD, Flux —
+  or a compose watcher like Komodo) watches a git repo (or registry) declared
+  to be the desired state and reconciles the deployment toward it. Deploy =
+  git commit; rollback = git revert; audit = git log; and nothing outside the
+  target needs credentials to change it. The cost: another system running
+  around the clock, and drift-by-hand becomes a fought-over anti-pattern.
 
-The middle ground this project occupies — kustomize overlays in git, edited
-ephemerally by the pipeline — is sometimes called *GitOps-lite*: desired
-state is versioned in git, but reconciliation is one-shot per deploy instead
-of continuous. Part II shows exactly where the line is drawn and why (a
-local lab cluster + a teaching goal beat a 24/7 controller).
+The middle ground this project occupies — compose files in git, their image
+knobs overridden per deploy by the pipeline — is sometimes called
+*GitOps-lite*: desired state is versioned in git, but reconciliation is
+one-shot per deploy instead of continuous. Part II shows exactly where the
+line is drawn and why (a local lab + a teaching goal beat a 24/7 controller).
 
 **In the GitHub UI:** for push-deploy, the deploy run's log *is* the audit
-trail (each apply/rollout with timestamps and the sha tag). For GitOps the
+trail (each pull/up with timestamps and the sha tag). For GitOps the
 UI moves to the Argo/Flux dashboard; the Actions tab only shows the commit
 that changed desired state.
 
@@ -1808,39 +1792,31 @@ the verification of last resort. This repo's loop is a `Taskfile.yml`
 
 <!-- source: Taskfile.yml -->
 ```yaml
-  cluster-create:
-    desc: Create the kind cluster (1 ingress-ready control-plane + 2 workers, host 8080 -> node 80)
-    cmds:
-      - kind create cluster --config .k8s/kind-cluster.yaml --name {{.CLUSTER}}
+  build:
+    desc: Build the 4 service images with the local p0 tags (the compose files' IMG_PREFIX/IMG_TAG defaults). frontend builds from the repo-root context so GUIDE.md gets baked into the image.
 ```
 
 <!-- source: Taskfile.yml -->
 ```yaml
   deploy:
-    desc: Apply one overlay (ENV=development|staging|production, default development) and wait for all rollouts
+    desc: Bring up one environment stack (ENV=development|staging|production, default development) and wait for health. Local p0 images by default; CD-style GHCR images via IMG_PREFIX/IMG_TAG (requires a prior `docker login ghcr.io`).
     cmds:
-      - kubectl apply -k .k8s/overlays/{{.ENV}}
+      - docker compose --file .docker/docker-compose.{{.ENV}}.yml up -d --wait
 ```
 
-The local deploy even mirrors CD's rollout gate (§25's composite action):
-
-<!-- source: Taskfile.yml -->
-```yaml
-      - |
-        for d in facts counter image frontend; do
-          kubectl rollout status deployment/$d -n github-actions-{{.ENV}} --timeout=180s
-        done
-```
+The local deploy *is* CD's deploy — the same compose file, the same
+`--wait` health gate (§25's composite action just adds the GHCR login and
+image knobs around it).
 
 And the smoke test is the same one the bootstrap runs:
 
 <!-- source: Taskfile.yml -->
 ```yaml
-            code=$(curl -s -o /dev/null -w '%{http_code}' --resolve "$env.github-actions.test:8080:127.0.0.1" "http://$env.github-actions.test:8080/")
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/")
 ```
 
 Why this matters for learning Actions specifically: when a *deploy* fails,
-the same kustomize overlay and the same rollout gate can be exercised locally
+the same compose file and the same health gate can be exercised locally
 (`task deploy ENV=staging`) in seconds — the workflow is just a remote
 executor of commands you can run by hand. Every workflow in this repo was
 first run as Taskfile commands.
@@ -1864,7 +1840,7 @@ never leaves the terminal.
 ## 37. DevEx: act — run workflows locally
 
 *Concept only — not part of this project's loop (its deploys target a
-local cluster; act's emulation adds little over the Taskfile, and self-hosted
+local Docker daemon; act's emulation adds little over the Taskfile, and self-hosted
 labels/macOS quirks would mislead more than help).*
 
 [`act`](https://github.com/nektos/act) runs workflows locally in Docker by
@@ -1923,7 +1899,7 @@ job log — click through to the web terminal.
 ## 39. DevEx: monorepo vs multi-repo
 
 *Concept only — this project is a single repo by design (the lab's whole
-point is one repo containing app + k8s + workflows); here is the decision
+point is one repo containing app + compose + workflows); here is the decision
 space.*
 
 - **Multi-repo** — one repo per service; each owns its pipeline. Clear
@@ -1985,19 +1961,18 @@ One diagram, the whole system:
             ▼
    ┌── Y O U R   M A C ──────────────────────────────────────────────┐
    │  actions-runner (native process, label deploy-local)             │
-   │        │ runs the composite action: rotate ghcr-pull secret,     │
-   │        │ kustomize edit set image, kubectl apply -k,             │
-   │        │ kubectl rollout status ×4                               │
+   │        │ runs the composite action: docker login (GHCR pull      │
+   │        │ token), compose pull, compose up -d --wait,             │
+   │        │ smoke-test the published port, docker logout            │
    │        ▼                                                         │
-   │  Docker Desktop → kind cluster "github-actions"                  │
-   │   ├─ control-plane (ingress-ready, host 8080 → node 80)          │
-   │   ├─ worker ×2                                                   │
-   │   └─ namespaces: github-actions-development                      │
-   │                  github-actions-staging                          │
-   │                  github-actions-production                       │
-   │        └─ ingress-nginx → frontend svc → GUIDE.md rendered +     │
-   │                            /api → facts|counter|image            │
-   │  http://{development,staging,production}.github-actions.test:8080│
+   │  Docker Desktop                                                  │
+   │   ├─ project github-actions-development   frontend :8080         │
+   │   ├─ project github-actions-staging       frontend :8081         │
+   │   └─ project github-actions-production    frontend :8082         │
+   │        (each: frontend → facts|counter|image containers on a     │
+   │         project-private network; frontend serves GUIDE.md        │
+   │         rendered + proxies /api/* to the backends)               │
+   │  http://localhost:{8080,8081,8082}                               │
    └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -2010,8 +1985,8 @@ Three design decisions worth internalizing before reading any file:
    needs to be exposed to the internet — "deploy from GitHub to my laptop"
    works with zero open ports (the plan explicitly rejected tunnels).
 3. **The commit is the contract.** CI tags every image `sha-<first-7>`; every
-   deploy re-derives that tag from git (head_sha or HEAD^2). Any running pod
-   can be traced to exactly one CI run and one commit.
+   deploy re-derives that tag from git (head_sha or HEAD^2). Any running
+   container can be traced to exactly one CI run and one commit.
 
 ## Repository layout
 
@@ -2033,16 +2008,13 @@ github_actions/
 │       ├── deploy-development.yaml   ← dispatch-only (ex-workflow_run)
 │       ├── deploy-staging.yaml       ← dispatch-only (ex-push)
 │       └── deploy-production.yaml    ← dispatch-only (ex-push) + approval
-├── .docker/                     ← one Dockerfile per service
+├── .docker/
 │   ├── facts/Dockerfile   counter/Dockerfile
 │   ├── image/Dockerfile   frontend/Dockerfile  ← bakes GUIDE.md + renderer in
-├── .k8s/
-│   ├── kind-cluster.yaml        ← 1 control-plane (ingress-ready) + 2 workers
-│   ├── base/                    ← namespace-agnostic manifests + kustomization
-│   └── overlays/
-│       ├── development/         ← ns github-actions-development, host dev…test
-│       ├── staging/
-│       └── production/          ← + 2 replicas per service
+│   ├── docker-compose.development.yml  ← env stack, project …-development, :8080
+│   ├── docker-compose.staging.yml      ← env stack, project …-staging,     :8081
+│   ├── docker-compose.production.yml   ← env stack, project …-production,  :8082
+│   └── (docker-compose-prod.yml / .ci.yml / .env — the SITE pipeline's pair, separate)
 └── app/
     ├── facts/    (FastAPI + pytest)      ← GET /facts?topic=
     ├── counter/  (Express + node:test)   ← POST /count
@@ -2053,7 +2025,7 @@ github_actions/
 The repo follows a strict two-file documentation rule (`GUIDE.md` +
 `agentic_development.md`); everything else teaches from code.
 
-## The application: four services, one ingress
+## The application: four services, one gateway
 
 Three language backends + an nginx gateway — chosen so one CI workflow
 demonstrates three real language toolchains on identical skeleton code:
@@ -2140,9 +2112,10 @@ mime.types would offer a download instead)… Alongside the guide page, the
 image also ships `demo.html` — a one-action page ("Try the app →" in the
 guide's top bar): enter a topic, get a single combined result card (Commons
 image + Wikipedia description + word counts). The counts are the
-service-to-service proof — the facts pod calls the counter pod itself, so
-the page's two parallel requests (`/api/facts`, `/api/image`) return a
-result the counter service already computed; the page never calls counter.
+service-to-service proof — the facts container calls the counter container
+itself, so the page's two parallel requests (`/api/facts`, `/api/image`)
+return a result the counter service already computed; the page never calls
+counter.
 
 <!-- source: app/frontend/nginx.conf -->
 ```nginx
@@ -2199,22 +2172,27 @@ instead of three? One runner boot per leg is unavoidable either way, but one
 *workflow file section* keeps the three toolchains diff-readable side by
 side — and `fail-fast: false` (§18) keeps all legs reporting.
 
-**Job `render`** — the k8s-side test: renders each kustomize overlay and
-fails on empty output with an annotated error (§29). This is what guarantees
-"kustomize overlays are valid" on every PR — before any image is built
+**Job `render`** — the deployment-side test: `docker compose config`
+interpolates and merges each environment's compose file into the final stack
+definition (a cheap "is the deploy config valid" render) and fails on
+empty output with an annotated error (§29). This is what guarantees
+"the compose stacks are valid" on every PR — before any image is built
 (quoted in §29).
 
 <!-- source: .github/workflows/ci.yaml -->
 ```yaml
-      - name: Render kustomize overlay
+      - name: Render compose stack
+        # docker compose config interpolates and merges the file into the
+        # final stack definition — a cheap "is the deploy config valid"
+        # check, on the preinstalled docker CLI of ubuntu-latest.
         run: |
           set -euo pipefail
-          out="$(kubectl kustomize .k8s/overlays/${{ matrix.env }})"
+          out="$(docker compose -f .docker/docker-compose.${{ matrix.env }}.yml config)"
           if [ -z "$out" ]; then
-            echo "::error::.k8s/overlays/${{ matrix.env }} rendered to EMPTY output"
+            echo "::error::docker-compose.${{ matrix.env }}.yml rendered to EMPTY output"
             exit 1
           fi
-          echo "overlay ${{ matrix.env }}: $(printf '%s\n' "$out" | wc -l | tr -d ' ') lines rendered"
+          echo "stack ${{ matrix.env }}: $(printf '%s\n' "$out" | wc -l | tr -d ' ') lines rendered"
 ```
 
 **Job `guide`** — the pipeline validates its own documentation: a stdlib
@@ -2295,7 +2273,7 @@ permissions (§20):
 ```yaml
     runs-on: [self-hosted, deploy-local]
     environment: development
-    # Serialize development deploys; never cancel a rollout already in flight.
+    # Serialize development deploys; never cancel a deploy already in flight.
     concurrency:
       group: deploy-development
       cancel-in-progress: false
@@ -2307,8 +2285,8 @@ permissions (§20):
 §13) from `HEAD_SHA`; call the composite action with the env-injected pull
 secret (§21, §25). A documented interaction from the workflow_run era: a
 manual CI run with `skip-build=true` completed `success` without pushing
-images, auto-triggered this workflow, and failed loudly at the rollout gate
-on the never-pushed tag (ImagePullBackOff after 180s) — accepted as the
+images, auto-triggered this workflow, and failed loudly at the deploy's pull
+step on the never-pushed tag — accepted as the
 *right* failure mode: a visible, explainable error beats silent no-ops.
 (Dispatch-only now, nothing auto-triggers; the same loud gate instead
 enforces the moving-tag rule for manual runs.)
@@ -2382,13 +2360,13 @@ descent:
 
 …with a post-walk guard emitting the §29 `::warning` when the walk lands on
 a commit that never went through `development` (squash/rebase merge or
-direct push) — it deploys anyway; the rollout gate fails loudly if the
+direct push) — it deploys anyway; the pull step fails loudly if the
 images were never built.
 
 **Why this constrains merge style:** "Create a merge commit" (or
 fast-forward) preserves the second-parent chain; **squash** and **rebase**
 merges leave no second parent — the walk stops early, warns, and probably
-fails the rollout gate (tag never built). The repo's branch flow (below) therefore
+fails at the pull step (tag never built). The repo's branch flow (below) therefore
 *requires* merge commits for promotion PRs. A cleaner-sounding alternative —
 rebuild images for every branch push — was rejected because staging/production
 should deploy *tested, already-built* artifacts, not fresh ones.
@@ -2402,212 +2380,179 @@ approvals so two queued production deploys can't interleave.
 ## The composite action: deploy-env
 
 `.github/actions/deploy-env/action.yaml` (§25 covered its interface) — the
-deploy body all three environments share, as four steps:
+deploy body all three environments share, as six steps:
 
-1. **Rotate the imagePullSecret** — `kubectl create secret … | kubectl apply`
-   is the idempotent create-or-update (§21's snippet): re-runnable every
-   deploy, and the mechanism by which a rotated GitHub PAT reaches the
-   cluster without any workflow edit.
-2. **Point the overlay at the built images** — the runner's checkout is
-   ephemeral, so `kustomize edit set image` mutates the working tree only;
-   the *overlay in git* stays environment-shape-only (§33's snippet).
-3. **Apply**:
+1. **Log in to GHCR** — the pull token (env-injected by the caller, §21)
+   goes to `docker login --password-stdin`: never argv, never a file, and
+   gone again before the job ends. The Docker daemon can now pull the
+   private images this deploy needs.
+2. **Pull the stack's images** — `docker compose pull` with the
+   `IMG_PREFIX`/`IMG_TAG` knobs exported. Pulling *before* `up` makes a
+   never-pushed tag fail HERE, loudly and within seconds, while the running
+   stack keeps serving untouched.
+3. **Deploy (recreate + wait healthy)**:
 
 <!-- source: .github/actions/deploy-env/action.yaml -->
 ```yaml
-    - name: Apply overlay
+    - name: Deploy (recreate + wait healthy)
       shell: bash
       env:
         DEPLOY_ENV: ${{ inputs.env }}
       run: |
         set -euo pipefail
-        kubectl apply -k ".k8s/overlays/$DEPLOY_ENV"
+        docker compose --file ".docker/docker-compose.$DEPLOY_ENV.yml" up -d --wait
 ```
 
-4. **Gate on rollouts** — the deploy is not "done" when apply returns; it is
-   done when all four deployments roll out. A tag that was never pushed
-   surfaces here as ImagePullBackOff within 180s:
+4. **Smoke-test the stack** — the deploy is not "done" when `up` returns; it
+   is done when the published frontend port answers. The compose file maps
+   each environment to its own port, so the smoke curls it:
 
 <!-- source: .github/actions/deploy-env/action.yaml -->
 ```yaml
-        for svc in facts counter image frontend; do
-          kubectl rollout status "deployment/$svc" -n "github-actions-$DEPLOY_ENV" --timeout=180s
-        done
+        case "$DEPLOY_ENV" in
+          development) port=8080 ;;
+          staging)     port=8081 ;;
+          production)  port=8082 ;;
+          *) echo "unknown environment: $DEPLOY_ENV" >&2; exit 1 ;;
+        esac
 ```
 
-…then the §29 `::group` summary prints the four deployed image coordinates.
+5. **Deploy summary** — the §29 `::group` prints the four deployed image
+   coordinates.
+6. **Log out of GHCR** — `if: always()` hygiene: the self-hosted runner
+   persists between jobs, so a registry login must not outlive the job that
+   created it (the only `always()` step in this repo — §17's concept, made
+   real).
 
-The rollout gate is the workflow's lie detector: it converts every upstream
-mistake (skip-build dispatches, squash merges, deleted packages) into a fast,
-visible, *pipeline-side* failure instead of a half-dead cluster discovered
-later.
+The `up -d --wait` + smoke pair is the workflow's lie detector: it converts
+every upstream mistake (skip-build dispatches, squash merges, deleted
+packages) into a fast, visible, *pipeline-side* failure instead of a
+half-dead stack discovered later.
 
-## Kubernetes: kind cluster, kustomize base and overlays
+## Docker compose: one stack per environment
 
-**kind cluster** (`.k8s/kind-cluster.yaml`) — one ingress-ready control-plane
-(host port 8080 → node 80) plus two workers, so pods genuinely spread over
-nodes:
+**The convention:** one compose file per environment
+(`.docker/docker-compose.<env>.yml`), each declaring its own project name
+and its own published frontend port. Three projects = three isolated stacks
+(own network, own containers) coexisting on one Docker host — the
+compose-era equivalent of three namespaces behind one ingress:
 
-<!-- source: .k8s/kind-cluster.yaml -->
+<!-- source: .docker/docker-compose.development.yml -->
 ```yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-  kubeadmConfigPatches:
-  - |
-    kind: InitConfiguration
-    nodeRegistration:
-      kubeletExtraArgs:
-        node-labels: "ingress-ready=true"
-  extraPortMappings:
-  - containerPort: 80
-    hostPort: 8080
-    protocol: TCP
-- role: worker
-- role: worker
+name: github-actions-development
 ```
 
-**Base + overlays.** The base carries the four Deployments+Services and the
-Ingress, deliberately *namespace-agnostic* (each overlay stamps one in):
+Only the frontend publishes a port, loopback-only, distinct per environment
+(staging 8081, production 8082 — the environment URL *is* the port):
 
-<!-- source: .k8s/base/kustomization.yaml -->
+<!-- source: .docker/docker-compose.development.yml -->
 ```yaml
-# Namespace-agnostic base: no resource carries a `namespace:` — each overlay's
-# `namespace:` field stamps every resource into its environment namespace.
-# Service NAMES stay short (facts, counter, ...) so the frontend nginx upstreams
-# (http://facts:8000 etc.) resolve inside whichever namespace this deploys to.
-
-resources:
-- facts.yaml
-- counter.yaml
-- image.yaml
-- frontend.yaml
-- ingress.yaml
+    ports:
+      # Loopback only: the lab is local; no reason to expose it past the Mac.
+      # Distinct port per environment = distinct "environment URL".
+      - "127.0.0.1:8080:80"
 ```
 
-Base image tags are the *local* `p0` tags (loaded into kind by `task
-build`/`task load`); CD overrides them per deploy:
+**Images interpolate two knobs.** Both default to the local-dev flow
+(`task build` tags `github-actions/github-actions-<svc>:p0`); CD exports both
+before `docker compose up` — so the *same file* serves the local loop and
+the pipeline (§33's GitOps-lite line):
 
-<!-- source: .k8s/base/kustomization.yaml -->
+<!-- source: .docker/docker-compose.development.yml -->
 ```yaml
-images:
-- name: github-actions/facts
-  newTag: p0
-- name: github-actions/counter
-  newTag: p0
-- name: github-actions/image
-  newTag: p0
-- name: github-actions/frontend
-  newTag: p0
+  facts:
+    image: ${IMG_PREFIX:-github-actions}/github-actions-facts:${IMG_TAG:-p0}
 ```
 
-An overlay = namespace + host patch (+ replicas for production):
+(The vars are named `IMG_*`, not `IMAGE_*`, on purpose: the sibling
+`.docker/.env` belongs to the site pipeline's compose pair and auto-loads
+for every compose invocation in that directory — its `IMAGE_TAG=ci` must not
+leak into these stacks' defaults.)
 
-<!-- source: .k8s/overlays/development/kustomization.yaml -->
+**Healthchecks are the probes.** Each service declares its own healthcheck —
+the compose counterpart of the readiness/liveness probes the k8s layer used
+to carry, tuned per runtime (slim Python has no wget; alpine's busybox
+resolves `localhost` to ::1 first):
+
+<!-- source: .docker/docker-compose.development.yml -->
 ```yaml
-resources:
-- namespace.yaml
-- ../../base
-
-namespace: github-actions-development
-
-patches:
-- patch: |-
-    - op: replace
-      path: /spec/rules/0/host
-      value: development.github-actions.test
-  target:
-    kind: Ingress
-    name: github-actions
+    healthcheck:
+      # python:3.12-slim ships no wget/curl — urllib it is.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
 ```
 
-<!-- source: .k8s/overlays/production/kustomization.yaml -->
+The counter service's generous budget encodes a hard-won lesson from the
+cluster era (slow npm cold starts under memory pressure must not fail the
+deploy):
+
+<!-- source: .docker/docker-compose.development.yml -->
 ```yaml
-namespace: github-actions-production
-
-replicas:
-- name: facts
-  count: 2
-- name: counter
-  count: 2
-- name: image
-  count: 2
-- name: frontend
-  count: 2
+      # Generous budget on purpose: npm+node cold start can take ~40s under
+      # memory pressure on the Mac (hard-won in the kind era — readiness may
+      # gate traffic while warming, but slow starts must not fail the deploy).
+      retries: 12
+      start_period: 10s
 ```
 
-Every Deployment carries `imagePullSecrets: ghcr-pull` — harmless for local
-dev (images preloaded, `IfNotPresent` means no pull) and *required* for CD
-(pulled from private GHCR):
+**The gateway waits for its backends.** nginx resolves its `proxy_pass`
+upstreams (facts/counter/image — the same service names, on the project's
+default network) once at startup and never re-resolves, so the frontend must
+not start before its backends are healthy:
 
-<!-- source: .k8s/base/facts.yaml -->
+<!-- source: .docker/docker-compose.development.yml -->
 ```yaml
-      # CD-deployed images live in private GHCR; the ghcr-pull secret is
-      # created by the deploy action / `task pull-secret`. Harmless for local
-      # dev: IfNotPresent + preloaded images means the kubelet never pulls.
-      imagePullSecrets:
-      - name: ghcr-pull
-      containers:
-      - name: facts
-        image: github-actions/facts:p0
-        imagePullPolicy: IfNotPresent
+    depends_on:
+      # nginx resolves its proxy_pass upstreams (facts/counter/image) once at
+      # startup and never re-resolves, so the backends must be up AND healthy
+      # before the frontend starts — or nginx exits "host not found".
+      facts:
+        condition: service_healthy
+      counter:
+        condition: service_healthy
+      image:
+        condition: service_healthy
 ```
 
-The counter Deployment's probe budgets encode a hard-won lesson (slow
-npm cold starts under memory pressure must not be killed):
+And every service carries `restart: unless-stopped`, which is what makes the
+stacks survive a reboot of Docker Desktop (the resume section rides on this).
 
-<!-- source: .k8s/base/counter.yaml -->
-```yaml
-        # npm+node cold start can take ~40s under memory pressure on the 8GB
-        # kind host: readiness gates traffic while warming; liveness kills only
-        # after ~80s so slow starts survive.
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: http
-          initialDelaySeconds: 10
-          periodSeconds: 5
-          failureThreshold: 12
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: http
-          initialDelaySeconds: 20
-          periodSeconds: 10
-          failureThreshold: 6
-```
+**What compose deliberately does NOT give you** (and why that is fine here):
+no rolling updates (a redeploy recreates containers — the old ones stop
+first), no rescheduling, no replica scaling behind one published port. That
+is the honest trade this lab made: the guide showcases GitHub Actions, not
+orchestration — when you need rolling deploys and self-healing replicas,
+that is the point where Kubernetes (or Nomad, or Swarm) earns its keep.
 
-Why the `github-actions.test` domain: `.test` is RFC-2606-reserved for
-exactly this (never resolvable publicly, no collision), and `.local` is
-reserved by macOS for mDNS.
-
-## imagePullSecrets: how private images reach the cluster
+## Private images: how GHCR credentials reach the deploy
 
 The full credential flow, end to end:
 
 1. A human creates a classic PAT with `read:packages` and stores it as the
    GitHub Actions secret `GHCR_PULL_TOKEN` (Settings → Secrets and variables
-   → Actions). Why a PAT and not `GITHUB_TOKEN`: the cluster pulls images
+   → Actions). Why a PAT and not `GITHUB_TOKEN`: the deploy pulls images
    *between* pipelines — it needs credentials that outlive any job (a
    fine-grained PAT or robot account would be the org-scale equivalent).
 2. On every deploy, the workflow hands the secret to the composite action
    via step env — masked in logs, unreadable to the action's own `inputs`
    (§21).
-3. The action rotates it into the target namespace as the `ghcr-pull`
-   imagePullSecret (§25's `create --dry-run | apply` snippet) — so a token
-   revocation + secret update is picked up by the *next deploy*, cluster-side,
-   with zero manual kubectl.
-4. Pods reference it via `imagePullSecrets` (the facts.yaml quote above);
-   the kubelet presents it when pulling from private GHCR.
+3. The action logs the Docker daemon in to GHCR with it (§25's
+   `--password-stdin` snippet) — so a token revocation + secret update is
+   picked up by the *next deploy*, with zero manual `docker login`.
+4. `docker compose pull` (with the `IMG_PREFIX`/`IMG_TAG` knobs) then
+   fetches the four private images; the final action step logs out again,
+   even on failure (`if: always()`).
 
-Locally, `task pull-secret` performs step 3 by hand for all three namespaces
-(refusing politely when the env var is unset):
+Locally, the same flow is two commands by hand — one login, then a deploy
+that overrides the same knobs CD sets:
 
 <!-- source: Taskfile.yml -->
 ```yaml
-  pull-secret:
-    desc: Apply the ghcr-pull imagePullSecret to all three namespaces (requires GHCR_PULL_TOKEN env var — a classic PAT with read:packages)
+  deploy:
+    desc: Bring up one environment stack (ENV=development|staging|production, default development) and wait for health. Local p0 images by default; CD-style GHCR images via IMG_PREFIX/IMG_TAG (requires a prior `docker login ghcr.io`).
 ```
 
 ## Branch and promotion flow
@@ -2621,8 +2566,8 @@ feature branch ──PR──▶ development ──PR(merge commit)──▶ sta
                         │ + build-push (sha-<7>)     │ (tag from HEAD^2)          │ (tag from HEAD^2,
                         │ + dispatch: deploy dev     │                            │  approval gate)
                         ▼                            ▼                            ▼
-                     ns github-actions-         ns github-actions-          ns github-actions-
-                        development                 staging                      production
+                  project github-actions-      project github-actions-     project github-actions-
+                  development  (port 8080)       staging    (port 8081)       production (port 8082)
 ```
 
 **The life of a commit:**
@@ -2633,7 +2578,7 @@ feature branch ──PR──▶ development ──PR(merge commit)──▶ sta
 2. CI completes green on `development` (images now in GHCR). Deploy
    development no longer fires on its own — it is `workflow_dispatch`-only
    (§6's note: the offline runner); pressing Run workflow deploys the moving
-   `development` tag to the development namespace.
+   `development` tag to the development stack.
 3. Promotion = a PR from `development` → `staging`, merged with **"Create a
    merge commit"** (the HEAD^2 contract, above), then a manual Run workflow
    of Deploy staging (dispatch-only too): tag resolved from the merge
@@ -2662,22 +2607,23 @@ survives terminal closes but **dies on reboot** (no auto-restart; `task up`
 checks and reminds you).
 
 **Why native and not a container** (a deliberate plan amendment): the deploy
-jobs must reach the kind cluster's API server, which listens on the *Mac's*
-localhost. A runner inside Docker Desktop would be in the VM network and
-could not reach the host loopback — every `kubectl` would fail. The native
-process sees the Mac exactly as a developer does.
+jobs run `docker compose` against the *Mac's* Docker daemon, and the stacks
+publish their ports on the Mac's loopback. A runner inside Docker Desktop
+would live in the VM network — a layer away from the Docker CLI and sockets
+the user actually sees. The native process talks to the Mac exactly as a
+developer does.
 
 **What it runs:** only jobs whose labels match `runs-on: [self-hosted,
 deploy-local]` — i.e., only the three deploy workflows' single jobs. Its
-working directory is a fresh checkout per job (the composite action's
-"kustomize edit is safe because the checkout is ephemeral" reasoning rides on
-this).
+working directory is a fresh checkout per job, and the deploy leaves nothing
+behind on it but the pulled images (the GHCR login is logged out in the same
+job; §25).
 
 **Security posture** (recapping §10): private repo; PR-triggered CI is
-cloud-only; the runner sees exactly one secret (the pull token, per-job env);
-cluster RBAC is untouched (the runner uses the Mac user's kubeconfig for a
-local lab cluster — acceptable here, and why it must never be pointed at a
-real cluster without narrowing).
+cloud-only; the runner sees exactly one secret (the pull token, per-job env,
+stdin-only, logged out before exit). What it *can* do is run any compose
+file a maintainer merged — which is why the repo stays private and deploys
+stay human-triggered.
 
 **In the GitHub UI:** Settings → Actions → Runners shows it Idle (running),
 Active (executing), or Offline (process down — the post-reboot state until
@@ -2685,9 +2631,10 @@ you restart it; Part II's resume section covers the fix).
 
 ## Resume after a reboot (and after two years)
 
-State that survives: the kind cluster and its namespaces (Docker Desktop
-volumes), the runner's registration/credentials on disk (no re-registration
-or token re-entry — just start it), `/etc/hosts` entries, the GitHub side
+State that survives: the three compose stacks (their containers carry
+`restart: unless-stopped`, so Docker Desktop starting is all it takes to
+bring them back), the runner's registration/credentials on disk (no
+re-registration or token re-entry — just start it), and the GitHub side
 entirely.
 
 State that dies: the runner *process* (nohup, not a service) and Docker
@@ -2695,24 +2642,24 @@ Desktop itself. So after any reboot:
 
 <!-- concept -->
 ```console
-$ task up            # docker check → kind nodes started (or cluster created)
-                     #   → runner CHECKED → missing overlays applied → smoke ×3
+$ task up            # docker check → stacks brought up + health-gated
+                     #   → runner CHECKED → smoke ×3
 $ task runner-start  # only if task up reported the runner down (idempotent)
 ```
-
-`task hosts` once more only if `/etc/hosts` was reset (rare).
 
 **Returning after two years:** start with this file and
 `agentic_development.md` (the project journal — current pipeline state,
 pending tasks); then `git log --oneline` for the human history. The
-bootstrap is still one command (`task up`). If the runner shows Offline in
-GitHub's UI despite `task runner-start`, check Settings → Actions → Runners
-for its last-seen time; if the registration was removed in the interim,
-re-register (Settings → Actions → Runners → New self-hosted runner — the
+bootstrap is still one command (`task up`; on a fresh machine, `brew install
+go-task` and Docker Desktop first, then `task deploy-all` to build local
+images). If the runner shows Offline in GitHub's UI despite
+`task runner-start`, check Settings → Actions → Runners for its last-seen
+time; if the registration was removed in the interim, re-register
+(Settings → Actions → Runners → New self-hosted runner — the
 download/configure/run script sequence; registration tokens expire after
 ~1h). If deploys queue but never start, the labels changed. If images 404,
 the PAT (secret `GHCR_PULL_TOKEN`) expired — classic PATs do; refresh and
-push once (the next deploy rotates it into the cluster automatically). And
+run one deploy (its login step picks the new token up immediately). And
 if you edit this guide, `task guide-check` (or a PR) will verify every
 snippet you quote still exists.
 
