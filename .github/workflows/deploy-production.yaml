@@ -1,4 +1,10 @@
-# CD: deploy production on merge (or direct push) to `production`.
+# CD: deploy production — started MANUALLY (Run workflow) on `production`.
+#
+# USED to fire automatically on push to `production`; that trigger was
+# removed because the job requires the self-hosted runner (usually offline)
+# — every push left the deploy queued forever. Dispatch on the branch you
+# mean to promote; the tag walk below starts from the dispatched branch
+# HEAD. The `production` GitHub environment still adds its approval gate.
 #
 # Tag resolution is identical to deploy-staging.yaml, one hop deeper: CI only
 # builds+pushes on push to `development`, so the tag is resolved by DESCENDING
@@ -14,8 +20,6 @@
 name: Deploy production
 
 on:
-  push:
-    branches: [production]
   workflow_dispatch:
     inputs:
       image_tag:

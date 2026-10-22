@@ -1,4 +1,9 @@
-# CD: deploy staging on merge (or direct push) to `staging`.
+# CD: deploy staging — started MANUALLY (Run workflow) on `staging`.
+#
+# USED to fire automatically on push to `staging`; that trigger was removed
+# because the job requires the self-hosted runner (usually offline) — every
+# push left the deploy queued forever. Dispatch on the branch you mean to
+# promote; the tag walk below starts from the dispatched branch HEAD.
 #
 # WHICH images get deployed: CI only builds+pushes on push to `development`
 # (tags sha-<7> + dev). This workflow resolves the tag by DESCENDING SECOND
@@ -12,8 +17,6 @@
 name: Deploy staging
 
 on:
-  push:
-    branches: [staging]
   workflow_dispatch:
     inputs:
       image_tag:

@@ -244,14 +244,15 @@ file" link when you click the "…" menu) — click through to view/edit it.
 
 ## 4. Events: what starts a workflow
 
-About thirty event types can start a workflow. The four this repo uses across
-its workflows:
+About thirty event types can start a workflow. The events this repo's
+workflows use — plus one it has retired:
 
 - `push` — commits pushed to a branch (or tag).
 - `pull_request` — activity on a PR (opened, synchronize, reopened…).
 - `workflow_dispatch` — a human pressed "Run workflow" (§6).
-- `workflow_run` — *another workflow* completed (used here to chain CD after
-  CI; §Part II).
+- `workflow_run` — *another workflow* completed (this lab chained CD after
+  CI with it until the deploys went dispatch-only — §6's note; Part II
+  keeps the gotcha it taught).
 
 Others you will commonly meet: `schedule` (cron, §7), `release`, `issues`,
 `issue_comment`, `create`/`delete` (branches/tags), `fork`, `star`, `check_run`.
@@ -327,20 +328,14 @@ The CI workflow filters pushes to one branch AND to six path prefixes:
 ```
 
 Meaning: a README-only push to `development` does not start CI. The deploy
-workflows use branch filters alone:
+workflows used branch filters alone (`on: push:` limited to `staging` /
+`production`); they are `workflow_dispatch`-only now (§6's note — the
+self-hosted runner), so their `on:` is just the manual trigger:
 
 <!-- source: .github/workflows/deploy-staging.yaml -->
 ```yaml
 on:
-  push:
-    branches: [staging]
   workflow_dispatch:
-    inputs:
-      image_tag:
-        description: 'Deploy this tag instead of the merge commit (e.g. sha-abcd123 or abcd123)'
-        required: false
-        type: string
-        default: ''
 ```
 
 One quirk worth memorizing (it bit this project): on a
@@ -393,18 +388,23 @@ deployed image tag — a manual rollback/redeploy lever:
         default: ''
 ```
 
-And deploy-development carries a bare `workflow_dispatch` (no inputs) purely
-as a debug re-run button:
+And deploy-development's whole `on:` block is now a bare `workflow_dispatch`
+(no inputs):
 
 <!-- source: .github/workflows/deploy-development.yaml -->
 ```yaml
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [development]
   workflow_dispatch:
 ```
+
+**Why the deploy workflows are manual-only.** All three used to fire
+automatically — deploy-development via `workflow_run` after CI, staging and
+production on `push`. But their jobs require the self-hosted runner on the
+author's Mac, which is usually offline, so every push left a deploy job
+queued *forever* waiting for a runner that was not there. The automatic
+triggers were removed: the lab starts each deploy with Run workflow, on
+purpose, once the runner is up. The operational lesson generalizes — an
+automatic trigger is only as reliable as the machine its jobs require.
 
 **In the GitHub UI:** Actions tab → choose the workflow in the left sidebar →
 if it has a `workflow_dispatch` trigger, a **"Run workflow"** dropdown appears
@@ -533,9 +533,10 @@ arbitrary code execution on the machine. The safe rules this project follows:
   from disaster. This repo is private, so only collaborators trigger runs.
 - **Untrusted code never reaches the runner.** Pull-request CI (the untrusted
   path — proposed code from contributors) runs on GitHub-hosted
-  `ubuntu-latest` only. The self-hosted runner executes only deploy workflows
-  triggered by `push`/`workflow_run`/`workflow_dispatch` on protected
-  long-lived branches — code that a maintainer already merged.
+  `ubuntu-latest` only. The self-hosted runner executes only deploy
+  workflows, started by `workflow_dispatch` on protected long-lived
+  branches — code a maintainer already merged, which a human then chose to
+  deploy.
 - **Least-privilege token on the runner** (§20) and **no secrets on the
   runner machine** — the pull token arrives per-job via env and is rotated
   into the cluster on every deploy (Part II).
@@ -750,9 +751,11 @@ harvested automatically.
 This project doesn't need job outputs, by design: its multi-job workflow (CI)
 ends at build+push, and the value that crosses the CI/CD boundary (the sha
 tag) travels through the *git commit itself* — deploy-development re-derives
-it from `github.event.workflow_run.head_sha`, deploy-staging/production from
-the merge commit's `HEAD^2`. When the artifact of a job is a pushed image
-tagged by commit sha, the commit *is* the message. (A reusable-workflow
+it from `github.event.workflow_run.head_sha` (kept from its workflow_run
+era; dispatch runs deploy the moving `development` tag instead),
+deploy-staging/production from the merge commit's `HEAD^2`. When the
+artifact of a job is a pushed image tagged by commit sha, the commit *is*
+the message. (A reusable-workflow
 refactor of the three deploy workflows would use job outputs or secrets-passing;
 see §26.)
 
@@ -852,7 +855,9 @@ And a two-state guard that treats manual runs as first-class:
 Without the `workflow_dispatch` arm, the bare-dispatch fallback (§6) could
 never pass the `workflow_run.conclusion` check — a bug class this project hit
 head-on during its environment-rename refactor (the guard was written for the
-trigger-only workflow, then dispatch was added).
+trigger-only workflow, then dispatch was added). Now that the workflow is
+dispatch-only (§6's note), the first arm is the one that fires; the guard
+stays, honest about both events.
 
 **In the GitHub UI:** skipped jobs/steps appear greyed-out with a
 circumvented-circle icon, and hovering shows the evaluated `if:` expression —
@@ -1091,12 +1096,13 @@ job:
     environment: production
 ```
 
-The design: `development` and `staging` deploy automatically; `production`
-carries a **required-reviewer** rule — when a production deploy job starts,
-it pauses in "Waiting" until a designated reviewer approves (or rejects) in
-the UI. No YAML change can bypass it: the gate is server-side. Combined with
-§19's serialized concurrency, production changes are one-at-a-time,
-human-approved, and branch-filtered (`push` to `production` only).
+The design: every deploy is started by a human — the workflows are
+`workflow_dispatch`-only (§6's note: the offline runner) — and `production`
+additionally carries a **required-reviewer** rule — when a production deploy
+job starts, it pauses in "Waiting" until a designated reviewer approves (or
+rejects) in the UI. No YAML change can bypass it: the gate is server-side.
+Combined with §19's serialized concurrency, production changes are
+one-at-a-time, human-initiated, and human-approved.
 
 Environment names are free-form strings — but the convention here binds four
 things under one name: the GitHub environment, the kustomize overlay
@@ -1366,8 +1372,9 @@ as a nested job in the caller's run. Max one level of nesting (a called
 workflow cannot call another).
 
 This repo chose three explicit sibling workflows over one reusable one: each
-deploy differs in *trigger semantics* (workflow_run vs push vs push+approval)
-more than in *body*, triggers cannot be parameterized into a `workflow_call`,
+deploy differs in *trigger semantics* (formerly workflow_run vs push vs
+push+approval — all dispatch-only now, §6's note) more than in *body*,
+triggers cannot be parameterized into a `workflow_call`,
 and having each environment's full logic in its own file means each can drift
 deliberately (production's approval notes, staging's warning text) without a
 `if: inputs.env == ...` lattice. The shared body was instead factored into
@@ -1969,9 +1976,9 @@ One diagram, the whole system:
    │                   counter,image,frontend}:{sha-xxxxxxx,          │
    │                   development}  (private)                        │
    │                                                                  │
-   │  workflow_run "CI" completed ──▶ Deploy development               │
-   │  push to staging           ──▶ Deploy staging                    │
-   │  push to production        ──▶ Deploy production (+approval)     │
+   │  Run workflow (dispatch)     ──▶ Deploy development               │
+   │  Run workflow              ──▶ Deploy staging                    │
+   │  Run workflow              ──▶ Deploy production (+approval)     │
    │        │ environment: development|staging|production             │
    └────────┼─────────────────────────────────────────────────────────┘
             │  job picked up via OUTBOUND HTTPS polling (no inbound ports)
@@ -2023,9 +2030,9 @@ github_actions/
 │   │       └── action.yaml      ← THE composite action (§25)
 │   └── workflows/
 │       ├── ci.yaml              ← tests ×3 + render ×3 + guide + build-push ×4
-│       ├── deploy-development.yaml   ← workflow_run-triggered
-│       ├── deploy-staging.yaml       ← push-triggered
-│       └── deploy-production.yaml    ← push-triggered + approval gate
+│       ├── deploy-development.yaml   ← dispatch-only (ex-workflow_run)
+│       ├── deploy-staging.yaml       ← dispatch-only (ex-push)
+│       └── deploy-production.yaml    ← dispatch-only (ex-push) + approval
 ├── .docker/                     ← one Dockerfile per service
 │   ├── facts/Dockerfile   counter/Dockerfile
 │   ├── image/Dockerfile   frontend/Dockerfile  ← bakes GUIDE.md + renderer in
@@ -2241,20 +2248,25 @@ CI ends here — deliberately. It builds and publishes, never deploys; CD is
 a separate workflow per environment, keeping triggers, permissions, and
 environments independently auditable.
 
-## Deploy development: workflow_run and the head_sha gotcha
+## Deploy development: workflow_run (retired) and the head_sha gotcha
 
-`.github/workflows/deploy-development.yaml` chains CD after CI without any
-polling: it *is* triggered by CI finishing.
+`.github/workflows/deploy-development.yaml` used to chain CD after CI
+without any polling: it *was* triggered by CI finishing.
 
-**Trigger** — `workflow_run` fires when the workflow *named* `CI` (the filter
-matches the workflow's `name:`, not its file name) completes on branch
-`development` (§6's quote shows the block).
+**Trigger — dispatch-only now.** The file originally fired on
+`workflow_run`: the workflow *named* `CI` (the filter matches the workflow's
+`name:`, not its file name) completing on branch `development`. That
+automatic trigger was removed — the deploy job needs the self-hosted Mac
+runner, usually offline, so every push left the job queued forever (§6's
+note). The lab deploys deliberately: runner up, then Run workflow.
 
-**The gotcha that owns this file.** Under `workflow_run`, `github.sha` is the
-*default branch's* commit — not the commit CI just built. If the deploy used
-`github.sha` it would happily deploy yesterday's image after a merge to the
-default branch. Every reference to the built commit therefore flows from
-`github.event.workflow_run.head_sha`:
+**The gotcha that owns this file (and why the expressions remain).** Under
+`workflow_run`, `github.sha` is the *default branch's* commit — not the
+commit CI just built. If the deploy used `github.sha` it would happily
+deploy yesterday's image after a merge to the default branch. Every
+reference to the built commit therefore flows from
+`github.event.workflow_run.head_sha` (empty under dispatch, so the
+`|| github.sha` fallback resolves to the dispatched ref's own commit):
 
 <!-- source: .github/workflows/deploy-development.yaml -->
 ```yaml
@@ -2293,11 +2305,13 @@ permissions (§20):
 
 **Steps** — checkout at `head_sha`; derive the image prefix/tag (POSIX-safe,
 §13) from `HEAD_SHA`; call the composite action with the env-injected pull
-secret (§21, §25). A documented interaction: a manual CI run with
-`skip-build=true` still completes `success`, still triggers this workflow,
-and then fails loudly at the rollout gate on the never-pushed tag
-(ImagePullBackOff after 180s) — accepted as the *right* failure mode: a
-visible, explainable error beats silent no-ops.
+secret (§21, §25). A documented interaction from the workflow_run era: a
+manual CI run with `skip-build=true` completed `success` without pushing
+images, auto-triggered this workflow, and failed loudly at the rollout gate
+on the never-pushed tag (ImagePullBackOff after 180s) — accepted as the
+*right* failure mode: a visible, explainable error beats silent no-ops.
+(Dispatch-only now, nothing auto-triggers; the same loud gate instead
+enforces the moving-tag rule for manual runs.)
 
 ## Deploy staging and production: merge commits, HEAD^2, and the approval gate
 
@@ -2306,7 +2320,10 @@ twins (same body, different branch/environment/concurrency group); the
 production file adds nothing structurally — the approval gate is *server
 side* (§22).
 
-**Trigger** — `push` to the branch, plus a dispatch override input (§5–§6).
+**Trigger** — `workflow_dispatch` only, with the `image_tag` override input
+(§6). Formerly `push` to the branch; the automatic trigger was removed with
+the offline-runner lesson (§6's note). Dispatch on the branch you mean to
+promote — the walk below starts from that branch's HEAD.
 
 **The image-resolution problem.** CI only builds on pushes to
 `development`. When a PR merges development → staging, the *merge commit* is
@@ -2600,9 +2617,9 @@ Three long-lived branches, PRs always in one direction:
 <!-- concept -->
 ```text
 feature branch ──PR──▶ development ──PR(merge commit)──▶ staging ──PR(merge commit)──▶ production
-                        │ CI: test+render            │ deploy staging             │ deploy production
+                        │ CI: test+render            │ dispatch: deploy staging   │ dispatch: deploy production
                         │ + build-push (sha-<7>)     │ (tag from HEAD^2)          │ (tag from HEAD^2,
-                        │ + deploy development       │                            │  approval gate)
+                        │ + dispatch: deploy dev     │                            │  approval gate)
                         ▼                            ▼                            ▼
                      ns github-actions-         ns github-actions-          ns github-actions-
                         development                 staging                      production
@@ -2613,16 +2630,18 @@ feature branch ──PR──▶ development ──PR(merge commit)──▶ sta
 1. Push/PR to `development` → CI: three language test legs + three render
    legs; on *push* (not PR) also four multi-arch builds tagged
    `sha-<7>` + `development`, pushed to GHCR.
-2. CI completes green on `development` → `workflow_run` fires → Deploy
-   development checks out `head_sha`, resolves the same `sha-<7>`, deploys to
-   the development namespace. Fully automatic.
+2. CI completes green on `development` (images now in GHCR). Deploy
+   development no longer fires on its own — it is `workflow_dispatch`-only
+   (§6's note: the offline runner); pressing Run workflow deploys the moving
+   `development` tag to the development namespace.
 3. Promotion = a PR from `development` → `staging`, merged with **"Create a
-   merge commit"** (the HEAD^2 contract, above). The push event triggers
-   Deploy staging: tag resolved from the merge commit's second parent —
-   the exact images CI built for the development head.
-4. `staging` → `production` PR likewise; the production deploy job
-   additionally parks in the environment's required-reviewer approval until
-   a human clicks Approve.
+   merge commit"** (the HEAD^2 contract, above), then a manual Run workflow
+   of Deploy staging (dispatch-only too): tag resolved from the merge
+   commit's second parent — the exact images CI built for the development
+   head.
+4. `staging` → `production` PR likewise, then dispatch Deploy production;
+   the job additionally parks in the environment's required-reviewer
+   approval until a human clicks Approve.
 
 **Promotion, precisely stated:** environments never rebuild; they *redeploy
 already-tested image tags*, and each promotion's PR merge commit encodes
