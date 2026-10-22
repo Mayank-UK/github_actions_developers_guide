@@ -1519,11 +1519,12 @@ The render job turns an empty kustomize output into a hard, annotated error:
 ```
 
 And the staging/production workflows surface a degraded-but-continuing path
-as a warning (direct push instead of a merge commit — see Part II):
+as a warning (squash/rebase merge or direct push — the resolved commit never
+went through `development`, so CI may never have built it; see Part II):
 
 <!-- source: .github/workflows/deploy-staging.yaml -->
 ```yaml
-            echo "::warning::staging HEAD is not a merge commit — deploying HEAD's tag; merge development PRs with 'Create a merge commit'"
+              echo "::warning::resolved commit $sha is NOT on development — CI only builds development pushes; images may not exist"
 ```
 
 (Other commands exist — `::debug::` behind the debug flag, `::add-mask::` to
@@ -2309,9 +2310,11 @@ side* (§22).
 
 **The image-resolution problem.** CI only builds on pushes to
 `development`. When a PR merges development → staging, the *merge commit* is
-new — CI never built it. But its **second parent** (`HEAD^2`) is the exact
-development-side commit CI did build. So the deploy resolves the tag from
-git topology (checkout needs `fetch-depth: 0` so parents exist):
+new — CI never built it. A promotion merge's **second parent** (`HEAD^2`)
+is the development side — and chained promotions (staging → production) put
+*further* merge commits in between, so the deploy resolves the tag by
+*walking second parents* back to a commit CI did build (checkout needs
+`fetch-depth: 0` so parents exist):
 
 <!-- source: .github/workflows/deploy-staging.yaml -->
 ```yaml
@@ -2321,8 +2324,8 @@ git topology (checkout needs `fetch-depth: 0` so parents exist):
           fetch-depth: 0
 ```
 
-Then the three-way resolution — dispatch override wins, else merge-commit
-parent, else a warned best-effort fallback:
+Then the resolution — dispatch override wins, else the second-parent
+descent:
 
 <!-- source: .github/workflows/deploy-staging.yaml -->
 ```yaml
@@ -2333,22 +2336,42 @@ parent, else a warned best-effort fallback:
               *)     tag="sha-$INPUT_TAG" ;;
             esac
             echo "deploy tag from dispatch input: $tag"
-          elif git rev-parse --verify --quiet HEAD^2 >/dev/null; then
-            # Merge commit: second parent is the development side — the commit
-            # CI actually built. Cut exactly 7 chars (--short=N may emit more
-            # on ambiguous prefixes, and CI tags are always 7).
-            tag="sha-$(git rev-parse HEAD^2 | cut -c1-7)"
-            echo "deploy tag from merge commit's development parent (HEAD^2): $tag"
           else
+            # Second-parent descent: a promotion merge's SECOND parent is the
+            # branch merged in, so walking second parents from HEAD unwinds
+            # staging<-development and lands on the commit CI actually built.
+            # Stops early at any commit already on origin/development (covers
+            # fast-forward promotions AND development tips that are themselves
+            # PR merge commits — built by CI, but a blind descent would
+            # overshoot them). Fetch-depth 0 (above) makes origin/development
+            # available.
+            sha="$(git rev-parse HEAD)"
+            while ! git merge-base --is-ancestor "$sha" origin/development 2>/dev/null; do
+              # rev-list prints "sha parent1 parent2": field 3 is the second
+              # parent; empty when the commit is a non-merge (or a root).
+              second="$(git rev-list --parents -n1 "$sha" | awk '{ print $3 }')"
+              if [ -z "$second" ]; then
+                break
+              fi
+              sha="$second"
+            done
+            # Cut exactly 7 chars (--short=N may emit more on ambiguous
+            # prefixes, and CI tags are always 7).
+            tag="sha-$(printf '%s' "$sha" | cut -c1-7)"
+…
+            echo "resolved deploy commit via second-parent descent: $sha"
+          fi
 ```
 
-…with the fallback branch emitting the §29 `::warning` and deploying HEAD's
-own tag.
+…with a post-walk guard emitting the §29 `::warning` when the walk lands on
+a commit that never went through `development` (squash/rebase merge or
+direct push) — it deploys anyway; the rollout gate fails loudly if the
+images were never built.
 
 **Why this constrains merge style:** "Create a merge commit" (or
-fast-forward) preserves HEAD^2; **squash** and **rebase** merges destroy the
-parent relationship — the workflow then falls back, warns, and probably fails
-the rollout gate (tag never built). The repo's branch flow (below) therefore
+fast-forward) preserves the second-parent chain; **squash** and **rebase**
+merges leave no second parent — the walk stops early, warns, and probably
+fails the rollout gate (tag never built). The repo's branch flow (below) therefore
 *requires* merge commits for promotion PRs. A cleaner-sounding alternative —
 rebuild images for every branch push — was rejected because staging/production
 should deploy *tested, already-built* artifacts, not fresh ones.
