@@ -1,0 +1,463 @@
+# CI (site): the guide-family pipeline for this repo's site deployment —
+# unit-test the services, scan for secrets, smoke the four production images
+# with a real browser, publish attested images from the production branch,
+# and prune old GHCR tags. This is the SITE pipeline; the repo's TEACHING
+# pipelines (kubernetes lab) live in the *.yaml workflows and are untouched.
+# The guide-snippet gate (scripts/check_snippets.py) also stays with the
+# teaching CI's own `guide` job — it guards GUIDE.md ↔ teaching files.
+name: CI (site)
+
+on:
+    push:
+        branches: [production]
+    pull_request:
+
+permissions:
+    contents: read
+
+jobs:
+    # One test job for what this repo actually ships: three services with
+    # real test suites (pytest / node --test / go test). The guide and the
+    # k8s manifests are covered by the teaching CI, not here.
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            # ---------- facts: Python / FastAPI, pytest ----------
+            - name: Set up Python
+              uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+              with:
+                  python-version: '3.12'
+                  cache: pip
+                  cache-dependency-path: app/facts/requirements.txt
+            - name: Install facts dependencies
+              # pytest (runner) and httpx (fastapi.testclient backend) are
+              # test-only deps, deliberately not in runtime requirements.txt.
+              run: pip install -r app/facts/requirements.txt pytest httpx
+            - name: Run facts tests
+              run: python -m pytest app/facts
+
+            # ---------- counter: Node 22, built-in test runner ----------
+            - name: Set up Node
+              uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+              with:
+                  node-version: 22
+                  cache: npm
+                  cache-dependency-path: app/counter/package-lock.json
+            - name: Install counter dependencies
+              working-directory: app/counter
+              run: npm ci
+            - name: Run counter tests
+              # GLOB form is mandatory: a bare directory argument hangs Node 22.
+              run: node --test "app/counter/*.test.js"
+
+            # ---------- image: Go, go test ----------
+            - name: Set up Go
+              uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+              with:
+                  go-version-file: app/image/go.mod
+                  cache: false # no go.sum (zero module deps) — setup-go caching requires one
+            - name: Run image tests
+              working-directory: app/image
+              run: go test ./...
+
+    secrets:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  fetch-depth: 0
+            - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # The image smoke + browser gate: build ALL FOUR production images
+    # locally, boot them with the prod compose file plus the CI override
+    # (frontend nginx published on the loopback), probe the homepage and a
+    # live proxied API, then drive the real rendered guide with Playwright.
+    e2e:
+        name: Image smoke + browser gate
+        needs: [test, secrets]
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+            - name: Build frontend image (local, amd64)
+              uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+              with:
+                  # frontend builds from the repo root (its Dockerfile COPYs
+                  # GUIDE.md and app/frontend/*); the backends build from
+                  # their app/ subdirectories.
+                  context: .
+                  file: .docker/frontend/Dockerfile
+                  platforms: linux/amd64
+                  push: false
+                  load: true
+                  tags: ghcr.io/mayank-uk/github-actions-guide-frontend:ci
+                  cache-from: type=gha,scope=frontend
+                  # Fork PRs run with a read-only token — never attempt cache
+                  # writes there; the expression yields '' (cache write off).
+                  cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=frontend' || '' }}
+
+            - name: Build counter image (local, amd64)
+              uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+              with:
+                  context: app/counter
+                  file: .docker/counter/Dockerfile
+                  platforms: linux/amd64
+                  push: false
+                  load: true
+                  tags: ghcr.io/mayank-uk/github-actions-guide-counter:ci
+                  cache-from: type=gha,scope=counter
+                  cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=counter' || '' }}
+
+            - name: Build facts image (local, amd64)
+              uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+              with:
+                  context: app/facts
+                  file: .docker/facts/Dockerfile
+                  platforms: linux/amd64
+                  push: false
+                  load: true
+                  tags: ghcr.io/mayank-uk/github-actions-guide-facts:ci
+                  cache-from: type=gha,scope=facts
+                  cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=facts' || '' }}
+
+            - name: Build image image (local, amd64)
+              uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+              with:
+                  context: app/image
+                  file: .docker/image/Dockerfile
+                  platforms: linux/amd64
+                  push: false
+                  load: true
+                  tags: ghcr.io/mayank-uk/github-actions-guide-image:ci
+                  cache-from: type=gha,scope=image
+                  cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=image' || '' }}
+
+            - name: Prepare the external frontend network
+              run: |
+                  set -euo pipefail
+                  # The prod compose references gadg_frontend as external:
+                  # compose looks it up, never creates it. Idempotent — safe
+                  # on reruns; a fresh runner just makes a fresh one.
+                  docker network create gadg_frontend 2>/dev/null || true
+
+            - name: Boot the production images (prod compose + CI override)
+              run: >
+                  docker compose -f .docker/docker-compose-prod.yml
+                  -f .docker/docker-compose.ci.yml up -d --wait --wait-timeout 300
+
+            - name: Probe the homepage and a live proxied API
+              run: |
+                  set -euo pipefail
+                  for attempt in 1 2 3 4 5; do
+                    if curl -fsS --max-time 10 http://127.0.0.1:8080/ >/dev/null; then
+                      break
+                    fi
+                    echo "homepage probe attempt ${attempt} failed; retrying" >&2
+                    sleep 5
+                  done
+                  # /api/count proves the whole proxy chain: nginx → counter,
+                  # over the shared app_internal network. POST is the only
+                  # method /count answers; it needs no outbound internet
+                  # (unlike /api/facts and /api/image).
+                  for attempt in 1 2 3 4 5; do
+                    if curl -fsS --max-time 10 -X POST \
+                        -H 'Content-Type: application/json' \
+                        -d '{"text":"github actions guide"}' \
+                        http://127.0.0.1:8080/api/count; then
+                      exit 0
+                    fi
+                    echo "api probe attempt ${attempt} failed; retrying" >&2
+                    sleep 5
+                  done
+                  echo 'probe through nginx failed' >&2
+                  exit 1
+
+            - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+              with:
+                  node-version: 22
+                  cache: npm
+                  cache-dependency-path: e2e/package-lock.json
+
+            - name: Run browser E2E against the booted stack
+              working-directory: e2e
+              env:
+                  E2E_BASE_URL: http://127.0.0.1:8080
+              run: |
+                  npm ci
+                  npx playwright install --with-deps chromium
+                  npm test
+
+            - name: Upload Playwright artifacts on failure
+              if: failure()
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                  name: playwright-artifacts
+                  path: |
+                      e2e/test-results
+                      e2e/playwright-report
+                  retention-days: 14
+
+            - name: Tear down the CI stack
+              if: always()
+              run: >
+                  docker compose -f .docker/docker-compose-prod.yml
+                  -f .docker/docker-compose.ci.yml down -v --remove-orphans
+
+    # The deployment VM's CPU decides what gets published: one SSH recon
+    # (uname -m) replaces the hardcoded platform pair — build-push then
+    # publishes exactly the one platform the VM runs.
+    vm-arch:
+        name: Detect VM architecture
+        runs-on: ubuntu-latest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+        # The VM SSH secrets live in the production environment — the same
+        # scope the deploy workflow reads them from.
+        environment: production
+        outputs:
+            arch: ${{ steps.arch.outputs.arch }}
+        steps:
+            - name: Read the VM's architecture over SSH
+              id: vm
+              uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+              with:
+                  host: ${{ secrets.VM_HOST }}
+                  username: ${{ secrets.VM_USER }}
+                  key: ${{ secrets.VM_PRIVATE_KEY }}
+                  fingerprint: ${{ secrets.VM_HOST_FINGERPRINT }}
+                  command_timeout: 1m
+                  capture_stdout: true
+                  # Banner noise in the captured stdout is why the marker exists.
+                  script: echo "VM_ARCH_MARKER=$(uname -m)"
+
+            - name: Map uname output to a Docker platform architecture
+              id: arch
+              shell: bash
+              env:
+                  VM_UNAME: ${{ steps.vm.outputs.stdout }}
+              run: |
+                  set -euo pipefail
+                  # capture_stdout returns the action's banner lines around the
+                  # real value — extract ONLY the marker line, then strip any
+                  # whitespace (a bare trim once glued banner noise onto the
+                  # value and no case matched).
+                  raw="$(printf '%s' "$VM_UNAME" | sed -n 's/^VM_ARCH_MARKER=//p' | head -n 1 | tr -d '[:space:]')"
+                  if [ -z "$raw" ]; then
+                    echo "No VM_ARCH_MARKER line in SSH output; refusing to guess." >&2
+                    exit 1
+                  fi
+                  case "$raw" in
+                    aarch64) arch=arm64 ;;
+                    x86_64 | amd64) arch=amd64 ;;
+                    *)
+                        echo "Unrecognized VM architecture: '$raw'" >&2
+                        exit 1
+                        ;;
+                  esac
+                  echo "arch=$arch" >> "$GITHUB_OUTPUT"
+
+    build-push:
+        name: Build and publish production images
+        needs: [e2e, vm-arch]
+        if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: write
+
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - service: frontend
+                      image: ghcr.io/mayank-uk/github-actions-guide-frontend
+                      context: .
+                      dockerfile: .docker/frontend/Dockerfile
+                    - service: counter
+                      image: ghcr.io/mayank-uk/github-actions-guide-counter
+                      context: app/counter
+                      dockerfile: .docker/counter/Dockerfile
+                    - service: facts
+                      image: ghcr.io/mayank-uk/github-actions-guide-facts
+                      context: app/facts
+                      dockerfile: .docker/facts/Dockerfile
+                    - service: image
+                      image: ghcr.io/mayank-uk/github-actions-guide-image
+                      context: app/image
+                      dockerfile: .docker/image/Dockerfile
+
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Compute commit image tag
+              id: image_tag
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+                  echo "tag=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+
+            # QEMU: every RUN step (npm ci / pip install / go build / apk) of
+            # a cross-arch build needs the emulation layer — the VM is aarch64
+            # while the runners are amd64.
+            - name: Set up QEMU
+              uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+            - name: Log in to GitHub Container Registry
+              uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Build and push image
+              uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+              with:
+                  context: ${{ matrix.context }}
+                  file: ${{ matrix.dockerfile }}
+                  platforms: linux/${{ needs.vm-arch.outputs.arch }}
+                  push: true
+                  # Supply-chain attestations: provenance (how/where the image
+                  # was built) + SBOM (what is inside it) — pushed alongside
+                  # the image as OCI artifacts, verifiable in GHCR.
+                  provenance: true
+                  sbom: true
+                  tags: |
+                      ${{ matrix.image }}:${{ steps.image_tag.outputs.tag }}
+                      ${{ matrix.image }}:production
+                  cache-from: type=gha,scope=${{ matrix.service }}
+                  cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+    # GHCR tag retention: every production push leaves one sha-<7> version per
+    # package. This job deletes sha-tagged versions beyond the newest 10 —
+    # keep-10 aligns with the VM's keep-5 release dirs plus margin for
+    # workflow_dispatch rollback targets; versions carrying
+    # `production`/`latest` are never pruned. UNTAGGED versions are NEVER
+    # deleted: GHCR lists every manifest as a version, so a tagged index has
+    # untagged CHILDREN (per-arch images, provenance/SBOM attestations) and
+    # deleting untagged versions breaks the tagged pull (2026-10-21 incident:
+    # an untagged sweep killed the children of a freshly published image and
+    # took the deploy down). Untagged accumulation is accepted and bounded;
+    # delete failures only warn — hygiene must never block CD.
+    ghcr-prune:
+        name: Prune old GHCR image tags
+        needs: [build-push]
+        if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: write
+
+        steps:
+            - name: Delete sha-tagged GHCR versions beyond the newest 10
+              shell: bash
+              env:
+                  # The token rides in env, never inlined into the script
+                  # body; the script never runs with set -x.
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -euo pipefail
+
+                  api='https://api.github.com'
+                  keep=10
+                  pages_max=3
+
+                  prune_package() {
+                      local pkg="$1"
+                      local encoded="${pkg//\//%2F}"
+                      local merged='[]'
+
+                      # (1) Paginate the version list; a short page ends the walk
+                      # (3 pages = 300 versions, far beyond anything real here).
+                      local page=1 page_file count
+                      while [ "$page" -le "$pages_max" ]; do
+                        page_file="$(mktemp)"
+                        if ! curl -fsS --max-time 30 \
+                            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                            -H 'Accept: application/vnd.github+json' \
+                            -o "$page_file" \
+                            "$api/user/packages/container/$encoded/versions?per_page=100&page=$page"; then
+                          echo "warn: could not list versions for $pkg — skipping it" >&2
+                          rm -f "$page_file"
+                          return 0
+                        fi
+                        if ! merged="$(jq --argjson m "$merged" --slurpfile p "$page_file" -n '$m + ($p[0] // [])')"; then
+                          echo "warn: malformed version page for $pkg — skipping it" >&2
+                          rm -f "$page_file"
+                          return 0
+                        fi
+                        count="$(jq 'length' "$page_file")"
+                        rm -f "$page_file"
+                        if [ "$count" -lt 100 ]; then
+                          break
+                        fi
+                        page=$((page + 1))
+                      done
+
+                      # Sanity guard: a malformed response must never feed the
+                      # delete loop — assert the accumulated list parses as a
+                      # JSON array BEFORE filtering; if not, warn and skip the
+                      # package (exit 0) rather than deleting blindly.
+                      if ! printf '%s' "$merged" | jq -e 'type == "array"' >/dev/null 2>&1; then
+                        echo "warn: version list for $pkg did not parse as JSON — skipping it" >&2
+                        return 0
+                      fi
+
+                      # (2) sha-tagged versions, newest first; (3) candidates
+                      # are those beyond the newest $keep minus any version
+                      # still carrying a protected tag. UNTAGGED versions are
+                      # deliberately absent from this rule: the versions API
+                      # exposes no parent/referrer link, so garbage orphans
+                      # and the live children of KEPT indexes are
+                      # indistinguishable — the 2026-10-21 incident deleted
+                      # freshly pushed children and broke every pull.
+                      local candidates
+                      candidates="$(printf '%s' "$merged" | jq --argjson keep "$keep" '
+                          [ .[]
+                            | select((.metadata.container.tags // [])
+                                 | any(.[]; test("^sha-[0-9a-f]{7}$"))) ]
+                          | sort_by(.created_at) | reverse
+                          | .[$keep:]
+                          | map(select(
+                                ((.metadata.container.tags // []) | index("production") | not) and
+                                ((.metadata.container.tags // []) | index("latest") | not)))
+                      ')"
+
+                      # (4) Deletes are individually NON-FATAL: a failure warns
+                      # and the loop continues — hygiene must never block CD.
+                      local total
+                      total="$(printf '%s' "$candidates" | jq 'length')"
+                      if [ "$total" -eq 0 ]; then
+                        echo "$pkg: nothing to prune"
+                        return 0
+                      fi
+                      echo "$pkg: pruning $total sha-tagged version(s) beyond the newest $keep"
+                      local id tags
+                      while read -r id tags; do
+                        curl -fsS --max-time 30 -X DELETE \
+                          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                          -H 'Accept: application/vnd.github+json' \
+                          "$api/user/packages/container/$encoded/versions/$id" \
+                          || echo "warn: failed to delete $pkg version $id — continuing" >&2
+                        echo "pruned $pkg version $id (tags: $tags)"
+                      done < <(printf '%s' "$candidates" | jq -r '.[] | "\(.id) \((.metadata.container.tags // []) | join(","))"')
+                  }
+
+                  # The /user/* package endpoints address GHCR containers by
+                  # their BARE name (ghcr.io/mayank-uk/github-actions-guide-frontend
+                  # is package "github-actions-guide-frontend"; the namespaced
+                  # form 404s). The encode above is a no-op here, kept
+                  # defensive for any future name carrying a '/'.
+                  prune_package 'github-actions-guide-frontend'
+                  prune_package 'github-actions-guide-counter'
+                  prune_package 'github-actions-guide-facts'
+                  prune_package 'github-actions-guide-image'

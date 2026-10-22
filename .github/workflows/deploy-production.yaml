@@ -1,12 +1,14 @@
 # CD: deploy production on merge (or direct push) to `production`.
 #
-# Tag resolution is identical to deploy-staging.yaml: CI only builds+pushes on
-# push to `development`, so the deploy tag comes from the merge commit's
-# development-side parent (HEAD^2).
-# => Merge PRs into production with "Create a merge commit" (or fast-forward);
-#    squash/rebase merges break the HEAD^2 relationship and this workflow
-#    falls back to HEAD with a ::warning:: — which may reference images CI
-#    never built (the rollout gate then fails loudly on ImagePullBackOff).
+# Tag resolution is identical to deploy-staging.yaml, one hop deeper: CI only
+# builds+pushes on push to `development`, so the tag is resolved by DESCENDING
+# SECOND PARENTS from HEAD — the walk unwinds production<-staging<-development
+# and stops at the first commit on `development` (a plain HEAD^2 read would
+# stop at the staging MERGE commit, which CI never built).
+# => Prefer merging PRs with "Create a merge commit" (or fast-forward);
+#    squash/rebase merges leave no second parent, so the walk stops at the
+#    squash commit with a ::warning:: — which may reference images CI never
+#    built (the rollout gate then fails loudly on ImagePullBackOff).
 # The `production` GitHub environment (P4) adds a required-reviewer approval
 # gate before this job's steps execute.
 name: Deploy production
@@ -37,7 +39,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      # Full history so the merge commit's second parent (HEAD^2) exists.
+      # Full history: the second-parent descent walks real parents and needs
+      # origin/development to exist in the checkout.
       - name: Check out repository (full history)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -61,19 +64,35 @@ jobs:
               *)     tag="sha-$INPUT_TAG" ;;
             esac
             echo "deploy tag from dispatch input: $tag"
-          elif git rev-parse --verify --quiet HEAD^2 >/dev/null; then
-            # Merge commit: second parent is the development side — the commit
-            # CI actually built. Cut exactly 7 chars (--short=N may emit more
-            # on ambiguous prefixes, and CI tags are always 7).
-            tag="sha-$(git rev-parse HEAD^2 | cut -c1-7)"
-            echo "deploy tag from merge commit's development parent (HEAD^2): $tag"
           else
-            # Direct push to production (not a merge commit): best effort —
-            # deploy HEAD's commit and warn; it is only deployable if that
-            # commit was also ever pushed to development (CI only builds it).
-            echo "::warning::production HEAD is not a merge commit — deploying HEAD's tag; merge development PRs with 'Create a merge commit'"
-            tag="sha-$(git rev-parse HEAD | cut -c1-7)"
-            echo "deploy tag fallback (HEAD): $tag"
+            # Second-parent descent: a promotion merge's SECOND parent is the
+            # branch merged in, so walking second parents from HEAD unwinds
+            # production<-staging<-development and lands on the commit CI
+            # actually built. Stops early at any commit already on
+            # origin/development (covers fast-forward promotions AND
+            # development tips that are themselves PR merge commits — built by
+            # CI, but a blind descent would overshoot them). Fetch-depth 0
+            # (above) makes origin/development available.
+            sha="$(git rev-parse HEAD)"
+            while ! git merge-base --is-ancestor "$sha" origin/development 2>/dev/null; do
+              # rev-list prints "sha parent1 parent2": field 3 is the second
+              # parent; empty when the commit is a non-merge (or a root).
+              second="$(git rev-list --parents -n1 "$sha" | awk '{ print $3 }')"
+              if [ -z "$second" ]; then
+                break
+              fi
+              sha="$second"
+            done
+            # Cut exactly 7 chars (--short=N may emit more on ambiguous
+            # prefixes, and CI tags are always 7).
+            tag="sha-$(printf '%s' "$sha" | cut -c1-7)"
+            if ! git merge-base --is-ancestor "$sha" origin/development 2>/dev/null; then
+              # e.g. squash/rebase merge or a direct push: the resolved commit
+              # never went through development, so CI likely never built it.
+              # Deploy anyway — the rollout gate fails loudly if images miss.
+              echo "::warning::resolved commit $sha is NOT on development — CI only builds development pushes; images may not exist"
+            fi
+            echo "resolved deploy commit via second-parent descent: $sha"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 

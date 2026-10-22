@@ -6,3 +6,6 @@ __pycache__
 coverage/
 bin/
 .pytest_cache/
+# Playwright E2E artifacts (e2e/node_modules is covered by node_modules above)
+e2e/test-results/
+e2e/playwright-report/
