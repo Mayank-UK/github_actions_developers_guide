@@ -277,13 +277,17 @@ on:
         required: false
         type: boolean
         default: false
+  # PR checks exist for PRs INTO development (feature -> dev); release PRs
+  # (-> production) are validated by the merge push itself, so every change
+  # produces exactly one CI run.
   pull_request:
+    branches: [development]
   push:
     branches: [development, production]
 ```
 
-Read it as: CI runs on a manual dispatch with a `skip-build` toggle; on every
-pull request; and on pushes to the two release branches — `development`
+Read it as: CI runs on a manual dispatch with a `skip-build` toggle; on PRs
+into `development`; and on pushes to the two release branches — `development`
 (builds the lab images) and `production` (validates and publishes the site
 images). There is deliberately no `paths:` filter: almost every file in this
 small repo feeds some job — app code, Dockerfiles, this guide (its snippet

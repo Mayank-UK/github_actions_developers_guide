@@ -27,7 +27,11 @@ on:
   # Every push to either release branch and every PR, deliberately WITHOUT a
   # paths filter: the repo is small and almost any file feeds some job
   # (app/, .docker/, GUIDE.md, scripts/, e2e/, the workflows themselves).
+  # PR checks exist for PRs INTO development (feature -> dev); release PRs
+  # (-> production) are validated by the merge push itself, so every change
+  # produces exactly one CI run.
   pull_request:
+    branches: [development]
   push:
     branches: [development, production]
 
