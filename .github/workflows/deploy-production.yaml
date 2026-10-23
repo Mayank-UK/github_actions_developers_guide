@@ -1,6 +1,6 @@
 # CD: deploy production — THE production deployment of this repo: the
 # public guide SITE (blue/green, zero downtime), served from an Oracle VM
-# at https://githubactionsdevelopersguide.makbuilds.duckdns.org/.
+# at https://githubactionsdevelopersguide.mayankcodeworks.com/.
 # - Green "CI" on the production branch deploys the exact commit CI just
 #   validated and published (the workflow_run trigger matches the workflow
 #   NAME "CI"); manual dispatch deploys a specified commit's sha-* GHCR
@@ -186,7 +186,7 @@ jobs:
             STATE_DIR="$ROOT/.deploy"
             STATE_FILE="$STATE_DIR/last-successful-sha"
             COLOR_FILE="$STATE_DIR/active-color"
-            HEALTH_URL="https://githubactionsdevelopersguide.makbuilds.duckdns.org/"
+            HEALTH_URL="https://githubactionsdevelopersguide.mayankcodeworks.com/"
 
             test -f "$APP_COMPOSE"
 

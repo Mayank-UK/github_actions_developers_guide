@@ -199,7 +199,7 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────
   # SITE track (public site served at
-  # githubactionsdevelopersguide.makbuilds.duckdns.org). These jobs validate
+  # githubactionsdevelopersguide.mayankcodeworks.com). These jobs validate
   # and publish the images deploy-production.yaml ships to the VM. The
   # validation jobs run on every push and PR; the publish chain is gated to
   # pushes to production. The lab `test` job needs no site counterpart —

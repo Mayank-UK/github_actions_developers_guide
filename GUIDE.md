@@ -85,7 +85,7 @@ own loopback port — no hostnames, no `/etc/hosts` edits:
 The *actual* production of this repo is not the Mac at all: the same four
 services — serving this very guide — are deployed by the production pipeline
 to a cloud VM at
-`https://githubactionsdevelopersguide.makbuilds.duckdns.org/` (blue/green
+`https://githubactionsdevelopersguide.mayankcodeworks.com/` (blue/green
 over SSH; Part II covers it). The local `production` stack above is the
 teaching artifact that mirrors it on your loopback.
 
@@ -2075,8 +2075,8 @@ One diagram, the whole system:
   │    pull, up --wait, smoke,    │  │  gadg_blue / gadg_green         │
   │    logout                     │  │    four service containers      │
   │         ▼                     │  │  https://githubactions-         │
-  │  Docker Desktop               │  │  developersguide.makbuilds.     │
-  │   ├─ github-actions-          │  │  duckdns.org/                   │
+  │  Docker Desktop               │  │  developersguide.mayank-        │
+  │   ├─ github-actions-          │  │  codeworks.com/                 │
   │   │  development  :8080       │  └─────────────────────────────────┘
   │   └─ github-actions-          │
   │      staging     :8081        │
@@ -2538,7 +2538,7 @@ staging should deploy *tested, already-built* artifacts, not fresh ones.
 `.github/workflows/deploy-production.yaml` is **the** production deployment
 of this repo — not the local compose lab, but the real, public site: this
 very guide, served at
-`https://githubactionsdevelopersguide.makbuilds.duckdns.org/` from a cloud
+`https://githubactionsdevelopersguide.mayankcodeworks.com/` from a cloud
 VM, fronted by a shared caddy that terminates TLS. It runs entirely on
 GitHub-hosted runners — no self-hosted lab runner involved — and drives the
 VM over SSH.
@@ -2813,7 +2813,7 @@ feature ──PR──▶ development ──PR(merge commit)──▶ staging �
                  │   a reason while offline)       │                            │
                  ▼                                 ▼                            ▼
           github-actions-development        github-actions-staging      https://githubactionsdevelopers-
-          (Mac lab, :8080)                  (Mac lab, :8081)            guide.makbuilds.duckdns.org/
+          (Mac lab, :8080)                  (Mac lab, :8081)            guide.mayankcodeworks.com/
 ```
 
 **The life of a commit:**
