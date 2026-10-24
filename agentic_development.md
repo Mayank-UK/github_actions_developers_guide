@@ -33,6 +33,9 @@
   static placeholder swap like kdg (__UMAMI_*__ tokens; unset builds drop the beacon line); analytics.js event queue (mount-time events held
   until the beacon loads — cold deep-links covered); events topic-open{topic} (TOC + demo submit) · external-link{target}; UMAMI_* repo-level
   GitHub Variables (never environment-scoped); site-track ci.yaml builds only. README.md is NEW and SUPERSEDES the two-.md rule (see below).
+- Umami data-distinct-id (2026-10-25): inline pre-beacon snippet in index.html + demo.html mints a localStorage UUID (mcw_vid) onto the beacon tag → Umami
+  identify() dedupes visitors across IP churn; self-guards (SCRIPT tagName + data-website-id) so it inert-no-ops in builds that delete the __UMAMI_SRC__ line.
+  Verified by Dockerfile sed swap/delete simulation + node guard sim (/tmp/verify-gadg/verify.log); runtime check pending post-deploy.
 - Verified 2026-10-22/24: actionlint 0 ×4 workflows; compose config -q all; TODO/FIXME clean (logs /tmp/verify-gadg-four.log, /tmp/verify-gadg-compose.log); plan phases → devlog.md.
 
 ## Failure registry (2026-10-10 session — read BEFORE touching pipelines; each line: symptom -> root cause -> rule)
