@@ -85,7 +85,7 @@ own loopback port — no hostnames, no `/etc/hosts` edits:
 The *actual* production of this repo is not the Mac at all: the same four
 services — serving this very guide — are deployed by the production pipeline
 to a cloud VM at
-`https://githubactionsdevelopersguide.makbuilds.duckdns.org/` (blue/green
+`https://githubactionsdevelopersguide.mayankcodeworks.com/` (blue/green
 over SSH; Part II covers it). The local `production` stack above is the
 teaching artifact that mirrors it on your loopback.
 
@@ -2075,8 +2075,8 @@ One diagram, the whole system:
   │    pull, up --wait, smoke,    │  │  gadg_blue / gadg_green         │
   │    logout                     │  │    four service containers      │
   │         ▼                     │  │  https://githubactions-         │
-  │  Docker Desktop               │  │  developersguide.makbuilds.     │
-  │   ├─ github-actions-          │  │  duckdns.org/                   │
+  │  Docker Desktop               │  │  developersguide.mayank-        │
+  │   ├─ github-actions-          │  │  codeworks.com/                 │
   │   │  development  :8080       │  └─────────────────────────────────┘
   │   └─ github-actions-          │
   │      staging     :8081        │
@@ -2220,8 +2220,13 @@ type imageResponse struct {
 
 <!-- source: .docker/frontend/Dockerfile -->
 ```dockerfile
-# *.html: the guide shell (index.html) + the interactive demo page (demo.html).
+# *.html: the guide shell (index.html) + the interactive demo page
+# (demo.html). js/ carries the analytics wrapper (inert without the
+# beacon tag swapped in below, so it ships in every build
+# unconditionally).
 COPY app/frontend/*.html /usr/share/nginx/html/
+COPY app/frontend/js/ /usr/share/nginx/html/js/
+COPY app/frontend/favicon.svg /usr/share/nginx/html/
 COPY app/frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY GUIDE.md /usr/share/nginx/html/GUIDE.md
 ```
@@ -2234,7 +2239,10 @@ image + Wikipedia description + word counts). The counts are the
 service-to-service proof — the facts container calls the counter container
 itself, so the page's two parallel requests (`/api/facts`, `/api/image`)
 return a result the counter service already computed; the page never calls
-counter.
+counter. At build time the image additionally swaps the served pages' Umami
+analytics beacon placeholder tokens — the values come from public repo
+Variables, and unconfigured builds delete the tag entirely (see the
+Dockerfile).
 
 <!-- source: app/frontend/nginx.conf -->
 ```nginx
@@ -2538,7 +2546,7 @@ staging should deploy *tested, already-built* artifacts, not fresh ones.
 `.github/workflows/deploy-production.yaml` is **the** production deployment
 of this repo — not the local compose lab, but the real, public site: this
 very guide, served at
-`https://githubactionsdevelopersguide.makbuilds.duckdns.org/` from a cloud
+`https://githubactionsdevelopersguide.mayankcodeworks.com/` from a cloud
 VM, fronted by a shared caddy that terminates TLS. It runs entirely on
 GitHub-hosted runners — no self-hosted lab runner involved — and drives the
 VM over SSH.
@@ -2813,7 +2821,7 @@ feature ──PR──▶ development ──PR(merge commit)──▶ staging �
                  │   a reason while offline)       │                            │
                  ▼                                 ▼                            ▼
           github-actions-development        github-actions-staging      https://githubactionsdevelopers-
-          (Mac lab, :8080)                  (Mac lab, :8081)            guide.makbuilds.duckdns.org/
+          (Mac lab, :8080)                  (Mac lab, :8081)            guide.mayankcodeworks.com/
 ```
 
 **The life of a commit:**
