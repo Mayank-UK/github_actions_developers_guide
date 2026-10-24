@@ -11,36 +11,29 @@
   - ci.yaml two tracks: lab (test-matrix/render/guide + build-push github-actions-* images, dev-push-gated) + site (secrets-scan; e2e
     image-smoke+Playwright on EVERY push/PR; vm-arch→publish→ghcr-prune for github-actions-guide-*, gated `push && refs/heads/production`).
     on: push [development, production] + bare pull_request + dispatch(skip-build also gates e2e); NO paths filter (§32 — every file feeds some job).
-  - Deploy dev/staging: runner-gated LAB deploys (workflow_run CI-completed + dispatch). check-target: non-green → skip; GET runners API;
-    offline → LOUD box ("task runner-start", re-run) + job SUCCEEDS (skip-with-reason). deploy: if runner_online=='true' || dispatch
-    (dispatch always attempts — human expected to have started the runner), runs-on [self-hosted, deploy-local]. Staging workflow_run arm is
-    DORMANT (CI never completes on a staging ref) — dispatch is the live path; HEAD^2 second-parent walk preserved verbatim.
+  - Deploy dev/staging: runner-gated LAB deploys (workflow_run CI-completed + dispatch). check-target: non-green → skip; GET runners API; offline
+    → LOUD box ("task runner-start", re-run) + job SUCCEEDS (skip-with-reason). deploy: if runner_online=='true' || dispatch (dispatch always
+    attempts), runs-on [self-hosted, deploy-local]. Staging workflow_run arm DORMANT — dispatch is the live path; HEAD^2 walk preserved verbatim.
   - deploy-production.yaml: THE production deploy (Oracle site; blue/green, flip-file, caddy, SSH, keep-5 prune intact): workflow_run
     [CI, branches [production]] + dispatch(required image_tag, gate ref==refs/heads/production). Local :8082 via `task deploy ENV=production`.
 - deploy-env composite action: docker login ghcr.io (--password-stdin) → `compose pull` (loud gate on never-built tags BEFORE touching
   running containers) → `up -d --wait` (health gate) → smoke curl on env port → ::group summary → logout `if: always()`.
-- Compose: .docker/docker-compose.<env>.yml, project github-actions-<env>, frontend loopback-only :8080/:8081/:8082; images
-  ${IMG_PREFIX:-github-actions}/github-actions-<svc>:${IMG_TAG:-p0} (IMG_* named deliberately — site pair's .docker/.env auto-loads
-  IMAGE_TAG=ci and must not leak); healthchecks per runtime (facts=python-urllib, slim has no wget; others busybox wget, 127.0.0.1);
-  frontend depends_on service_healthy ×3 (nginx resolves proxy_pass upstreams once at startup); restart: unless-stopped (survives reboots).
-  FULL-WORD env naming everywhere; staging/prod resolve images via merge-commit HEAD^2 walk + dispatch override; dev dispatch moves the
-  `development` tag (registry rule 8).
-- Local flow: `task build` tags github-actions/github-actions-<svc>:p0 (GHCR shape minus registry — ONE compose file serves local + CD);
-  task up = docker check → compose up --wait ×3 → runner check → smoke; task deploy/down/smoke re-pointed at ports; deploy-all = build + up ×3.
+- Compose: .docker/docker-compose.<env>.yml, project github-actions-<env>, frontend loopback-only :8080/:8081/:8082; images ${IMG_PREFIX:-github-actions}/
+  github-actions-<svc>:${IMG_TAG:-p0} (IMG_* named so the site pair's .docker/.env IMAGE_TAG=ci cannot leak); healthchecks per runtime (facts=python-urllib,
+  slim has no wget; others busybox wget 127.0.0.1); frontend depends_on service_healthy ×3 (nginx fixes proxy_pass upstreams at startup); restart:
+  unless-stopped. FULL-WORD env naming everywhere; staging/prod resolve images via HEAD^2 walk + dispatch override; dev dispatch moves `development` tag.
+- Local flow: `task build` tags github-actions/github-actions-<svc>:p0 (ONE compose file serves local + CD); task up = docker check → up --wait ×3 → runner check → smoke; deploy-all = build + up ×3.
 - Site pipeline (multi-service static): https://githubactionsdevelopersguide.mayankcodeworks.com from the Oracle VM (aarch64); compose pair
-  docker-compose-prod.yml/.ci.yml + committed .docker/.env (IMAGE_TAG=ci); images ghcr.io/mayank-uk/github-actions-guide-{frontend,counter,
-  facts,image}, tags sha-<7> + moving production; e2e/ Playwright. Setup DONE (production-env secrets + infra caddy gadg snippet →
-  platform/upstream.caddy). Domain migrated 2026-10-23: makbuilds.duckdns.org → mayankcodeworks.com (old URLs 301 at caddy edge).
-- GUIDE.md = two-part markdown SSoT SERVED by the frontend at / (vendored marked@12 + hljs@11 baked into the image — sidebar, search,
-  offline, no CDN; /api/* still proxied so guide pages get inline live demos). Snippet invariant "code is the source of truth": every
-  snippet captioned `source: <path>`; scripts/check_snippets.py in CI verifies snippets exist AND fails raw <script>/<style>/<template>
-  outside fences. Re-taught for the current shape; 90/90 snippets green (2026-10-24).
+  docker-compose-prod.yml/.ci.yml + committed .docker/.env (IMAGE_TAG=ci); images github-actions-guide-{frontend,counter,facts,image} sha-<7> +
+  moving production; e2e Playwright; setup DONE (secrets + caddy gadg snippet → platform/upstream.caddy). Domain → mayankcodeworks.com 2026-10-23 (301s).
+- GUIDE.md = two-part markdown SSoT SERVED by the frontend at / (vendored marked@12 + hljs@11, no CDN; /api/* proxied for inline live demos).
+  Snippet invariant "code is the source of truth": every snippet captioned `source: <path>`; scripts/check_snippets.py in CI verifies snippets
+  AND fails raw <script>/<style>/<template> outside fences. Re-taught for the current shape; 90/90 green (2026-10-24).
 - UMAMI ANALYTICS (2026-10-24, development 3b206bb + 92f087d): umami.mayankcodeworks.com, website_id c0114b9d-f04b-4416-ad19-2c3f3316322b;
   static placeholder swap like kdg (__UMAMI_*__ tokens; unset builds drop the beacon line); analytics.js event queue (mount-time events held
   until the beacon loads — cold deep-links covered); events topic-open{topic} (TOC + demo submit) · external-link{target}; UMAMI_* repo-level
   GitHub Variables (never environment-scoped); site-track ci.yaml builds only. README.md is NEW and SUPERSEDES the two-.md rule (see below).
-- Verified 2026-10-22/24: actionlint 0 findings ×4 workflows; compose config -q OK (dev/staging/prod + site pair); TODO/FIXME clean
-  (logs /tmp/verify-gadg-four.log, /tmp/verify-gadg-compose.log). Full narrative + approved CI/CD plan phases → devlog.md.
+- Verified 2026-10-22/24: actionlint 0 ×4 workflows; compose config -q all; TODO/FIXME clean (logs /tmp/verify-gadg-four.log, /tmp/verify-gadg-compose.log); plan phases → devlog.md.
 
 ## Failure registry (2026-10-10 session — read BEFORE touching pipelines; each line: symptom -> root cause -> rule)
 1. Zero Actions runs on first repo push -> paths-filtered workflows don't fire on a repo's very first push (no diff base) -> next matching push triggers; don't debug the workflow.
@@ -57,9 +50,8 @@
 12. Deploy jobs queued forever -> runner lacked the `deploy-local` label -> config.sh --labels deploy-local (or add via UI); runner DIES on reboot -> `task up`.
 13. GitHub API: PR merge = PUT (POST 404s misleadingly); env pending-deployment APPROVE endpoint 404s on personal accounts -> UI click is the only approval path there.
 14. kind ingress 503/unreachable -> ingress-nginx kind manifest node-selects os=linux only; hostPort lives on the control plane -> patch nodeSelector ingress-ready=true (in Taskfile `ingress`).
-- USER FILE RULE (2026-10-10): originally exactly TWO .md files — agentic_development.md + the single GUIDE.md; no runner/README; all
-  teaching/setup/resume docs live in GUIDE.md only. SUPERSEDED (2026-10-24): README.md now exists per the user's README-per-repo instruction;
-  devlog.md was added in the 2026-10-24 cleanup as the AI-section archive (bookkeeping only — teaching docs still live in GUIDE.md only).
+- USER FILE RULE (2026-10-10): originally exactly TWO .md files — agentic_development.md + GUIDE.md; all teaching/setup/resume docs live in
+  GUIDE.md only. SUPERSEDED (2026-10-24): README.md per the user's README-per-repo instruction; devlog.md added as the AI-section archive (bookkeeping only).
 
 ## Active tasks
 - ⏳ Watch the consolidation push land live (new CI shape; Deploy development should skip-with-reason while the runner is offline; workflow history wiped to watch from scratch).
