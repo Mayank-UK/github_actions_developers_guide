@@ -2220,8 +2220,13 @@ type imageResponse struct {
 
 <!-- source: .docker/frontend/Dockerfile -->
 ```dockerfile
-# *.html: the guide shell (index.html) + the interactive demo page (demo.html).
+# *.html: the guide shell (index.html) + the interactive demo page
+# (demo.html). js/ carries the analytics wrapper (inert without the
+# beacon tag swapped in below, so it ships in every build
+# unconditionally).
 COPY app/frontend/*.html /usr/share/nginx/html/
+COPY app/frontend/js/ /usr/share/nginx/html/js/
+COPY app/frontend/favicon.svg /usr/share/nginx/html/
 COPY app/frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY GUIDE.md /usr/share/nginx/html/GUIDE.md
 ```
@@ -2234,7 +2239,10 @@ image + Wikipedia description + word counts). The counts are the
 service-to-service proof — the facts container calls the counter container
 itself, so the page's two parallel requests (`/api/facts`, `/api/image`)
 return a result the counter service already computed; the page never calls
-counter.
+counter. At build time the image additionally swaps the served pages' Umami
+analytics beacon placeholder tokens — the values come from public repo
+Variables, and unconfigured builds delete the tag entirely (see the
+Dockerfile).
 
 <!-- source: app/frontend/nginx.conf -->
 ```nginx
