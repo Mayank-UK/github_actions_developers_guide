@@ -9,7 +9,8 @@
   image Go :8080, frontend nginx :80 proxying /api; real tests (pytest / node --test / go test).
 - FOUR workflows only: CI + Deploy development/staging/production (teaching-named *.yaml; old site pair ci.yml+deploy-production.yml folded in and DELETED).
   - ci.yaml two tracks: lab (test-matrix/render/guide + build-push github-actions-* images, dev-push-gated) + site (secrets-scan; e2e
-    image-smoke+Playwright on EVERY push/PR; vm-arch→publish→ghcr-prune for github-actions-guide-*, gated `push && refs/heads/production`).
+    image-smoke+Playwright on EVERY push/PR; publish→ghcr-prune for github-actions-guide-*, gated `push && refs/heads/production`, platform
+    from repo variable VM_ARCH || arm64 — NO vm-arch job/VM credentials in CI, approval gate only on deploy-production).
     on: push [development, production] + bare pull_request + dispatch(skip-build also gates e2e); NO paths filter (§32 — every file feeds some job).
   - Deploy dev/staging: runner-gated LAB deploys (workflow_run CI-completed + dispatch). check-target: non-green → skip; GET runners API; offline
     → LOUD box ("task runner-start", re-run) + job SUCCEEDS (skip-with-reason). deploy: if runner_online=='true' || dispatch (dispatch always

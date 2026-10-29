@@ -483,7 +483,7 @@ gate, then (on production pushes only) the publish chain:
 ```yaml
   publish:
     name: publish (${{ matrix.service }})
-    needs: [e2e, vm-arch]
+    needs: [e2e]
 ```
 
 Which produces this graph in every CI run (a standalone `guide` job —
@@ -491,8 +491,8 @@ Part II — runs alongside, validating this guide's snippets):
 
 <!-- concept -->
 ```text
-  guide (snippets)                       vm-arch (VM SSH recon)
-        [standalone]                     [standalone, prod pushes only]
+  guide (snippets)
+        [standalone]
 
   test-matrix (facts)    ─┬──► build-push x4      (lab images; pushes to
   test-matrix (counter)  ─┤                         development only)
@@ -518,7 +518,7 @@ carries its own branch gate, §17).
 with colored nodes (green/yellow/red/grey) beside the job list. Watch it
 animate during a real CI run: test-matrix and render nodes fill first, then
 the build-push column lights up; on a production push, e2e leads into
-vm-arch, publish, and ghcr-prune.
+publish and ghcr-prune.
 
 ## 9. Runners: GitHub-hosted
 
@@ -2054,7 +2054,7 @@ One diagram, the whole system:
   │  │ secrets-scan ───► e2e (site images + Playwright)    │           │
   │  │   lab arm:  build-push ×4 → GHCR github-actions-*   │           │
   │  │             (multi-arch, dev pushes only)           │           │
-  │  │   site arm: vm-arch ─► publish ×4 ─► ghcr-prune     │           │
+  │  │   site arm: publish ×4 ─► ghcr-prune                │           │
   │  │             (github-actions-guide-*, prod pushes)   │           │
   │  └───────────┬──────────────────────────┬──────────────┘           │
   │              │ workflow_run (green CI)   │ workflow_run (green CI) │
@@ -2121,8 +2121,8 @@ github_actions/
 │   └── workflows/               ← exactly FOUR workflows
 │       ├── ci.yaml              ← ONE CI, two tracks: test ×3 + render ×3 +
 │       │                          guide + secrets-scan + e2e; build-push ×4
-│       │                          (lab, dev-gated); vm-arch/publish ×4/
-│       │                          ghcr-prune (site, prod-gated)
+│       │                          (lab, dev-gated); publish ×4/ghcr-prune
+│       │                          (site, prod-gated)
 │       ├── deploy-development.yaml   ← workflow_run+dispatch; runner-gated lab
 │       ├── deploy-staging.yaml       ← dispatch (workflow_run declared, dormant)
 │       └── deploy-production.yaml    ← THE site deploy: SSH blue/green on the VM
@@ -2360,14 +2360,21 @@ secrets-scan]` — the site pipeline's old standalone test job folded into
 `test-matrix` (identical suites), so nothing runs twice. A dispatch with
 `skip-build` skips it (it builds all four images).
 
-**Jobs `vm-arch`, `publish`, `ghcr-prune` — the production-gated arm.** All
-three carry `if: push && refs/heads/production`. One SSH recon (`uname -m`)
-asks the deployment VM its architecture; `publish` then builds each site
-image for exactly that platform with provenance + SBOM attestations, double
-tags it (`sha-<7>` immutable + `production` moving), and `ghcr-prune`
-deletes sha-tagged GHCR versions beyond the newest 10 (untagged versions are
-never touched — the incident note in the file explains why). These are the
-images Deploy production ships to the VM.
+**Jobs `publish`, `ghcr-prune` — the production-gated arm.** Both carry
+`if: push && refs/heads/production`. `publish` builds each site image for
+exactly the deployment VM's architecture — read from the *repository*
+variable `VM_ARCH` (`platforms: linux/${{ vars.VM_ARCH || 'arm64' }}`:
+flip the variable if the VM is ever replaced, fallback = the current
+VM's arm64) — with provenance + SBOM attestations, double tags it
+(`sha-<7>` immutable + `production` moving), and `ghcr-prune` deletes
+sha-tagged GHCR versions beyond the newest 10 (untagged versions are never
+touched — the incident note in the file explains why). These are the images
+Deploy production ships to the VM. The arch deliberately rides a repository
+variable rather than an SSH recon into the VM: the old design ran `uname -m`
+there, and binding that job to the protected production environment meant
+CI waited for a deployment approval before it could publish. Today CI holds
+zero VM credentials and is bound to no environment — publishing never
+waits; the approval gate lives only on Deploy production.
 
 CI ends here — deliberately. It validates and publishes both image families;
 it never deploys. CD is a separate workflow per environment, keeping
@@ -2841,7 +2848,7 @@ feature ──PR──▶ development ──PR(merge commit)──▶ staging �
    of Deploy staging: tag resolved from the merge commit's second parent —
    the exact images CI built for the development head. Same runner gate.
 4. `staging` → `production` PR likewise; the merge *push* fires CI's site
-   arm — e2e gate, vm-arch, publish ×4 (attested site images), ghcr-prune —
+   arm — e2e gate, publish ×4 (attested site images), ghcr-prune —
    and green CI then auto-triggers Deploy production, which parks in the
    environment's required-reviewer approval until a human clicks Approve,
    then SSHes the VM and flips blue/green. Rollback = dispatch Deploy
