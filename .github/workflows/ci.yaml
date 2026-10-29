@@ -372,9 +372,11 @@ jobs:
     name: Detect VM architecture
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/production'
-    # The VM SSH secrets live in the production environment — the same
-    # scope the deploy workflow reads them from.
-    environment: production
+    # The VM SSH secrets are COPIES at repo scope — this job must NOT
+    # declare the protected production environment, or CI waits for a
+    # deployment approval before it can even publish. Approval stays on
+    # the deploy workflow's job alone (deploy-production.yaml).
+    # env: production — deliberately absent here.
     outputs:
       arch: ${{ steps.arch.outputs.arch }}
     steps:
