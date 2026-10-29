@@ -4,7 +4,7 @@
 #                    build-push x4 (github-actions-* images) — push to
 #                    development only; consumed by the lab compose deploys.
 #   site (public):   secrets + e2e (image smoke + Playwright) — every event;
-#                    vm-arch + publish x4 (github-actions-guide-* images) +
+#                    publish x4 (github-actions-guide-* images) +
 #                    ghcr-prune — push to production only; consumed by
 #                    deploy-production.yaml's SSH deploy to the VM.
 # CI ends at build+push/publish, never deploys. Deploys live in one workflow
@@ -365,66 +365,21 @@ jobs:
           docker compose -f .docker/docker-compose-prod.yml
           -f .docker/docker-compose.ci.yml down -v --remove-orphans
 
-  # The deployment VM's CPU decides what gets published: one SSH recon
-  # (uname -m) replaces the hardcoded platform pair — publish then publishes
-  # exactly the one platform the VM runs.
-  vm-arch:
-    name: Detect VM architecture
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/production'
-    # The VM SSH secrets are COPIES at repo scope — this job must NOT
-    # declare the protected production environment, or CI waits for a
-    # deployment approval before it can even publish. Approval stays on
-    # the deploy workflow's job alone (deploy-production.yaml).
-    # env: production — deliberately absent here.
-    outputs:
-      arch: ${{ steps.arch.outputs.arch }}
-    steps:
-      - name: Read the VM's architecture over SSH
-        id: vm
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_PRIVATE_KEY }}
-          fingerprint: ${{ secrets.VM_HOST_FINGERPRINT }}
-          command_timeout: 1m
-          capture_stdout: true
-          # Banner noise in the captured stdout is why the marker exists.
-          script: echo "VM_ARCH_MARKER=$(uname -m)"
-
-      - name: Map uname output to a Docker platform architecture
-        id: arch
-        shell: bash
-        env:
-          VM_UNAME: ${{ steps.vm.outputs.stdout }}
-        run: |
-          set -euo pipefail
-          # capture_stdout returns the action's banner lines around the
-          # real value — extract ONLY the marker line, then strip any
-          # whitespace (a bare trim once glued banner noise onto the
-          # value and no case matched).
-          raw="$(printf '%s' "$VM_UNAME" | sed -n 's/^VM_ARCH_MARKER=//p' | head -n 1 | tr -d '[:space:]')"
-          if [ -z "$raw" ]; then
-            echo "No VM_ARCH_MARKER line in SSH output; refusing to guess." >&2
-            exit 1
-          fi
-          case "$raw" in
-            aarch64) arch=arm64 ;;
-            x86_64 | amd64) arch=amd64 ;;
-            *)
-              echo "Unrecognized VM architecture: '$raw'" >&2
-              exit 1
-              ;;
-          esac
-          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+  # The deployment VM's CPU decides what gets published. The arch rides the
+  # REPOSITORY variable VM_ARCH (Settings → Secrets and variables → Actions
+  # → Variables — NOT the production environment, whose values are only
+  # released to environment-bound jobs after approval). CI therefore holds
+  # no VM credentials at all; flip the variable if the VM is ever replaced
+  # with a different CPU. Fallback = the current VM's arm64.
+  # (The old design SSHed into the VM to run uname -m; binding that job to
+  # the protected environment made CI wait for a deployment approval.)
 
   # The site publish job (id "publish" — the lab's build-push above owns the
   # other image family). Attested single-platform images for the VM, double
   # tag: immutable sha-<7> + moving production.
   publish:
     name: publish (${{ matrix.service }})
-    needs: [e2e, vm-arch]
+    needs: [e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/production'
     runs-on: ubuntu-latest
     permissions:
@@ -484,7 +439,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          platforms: linux/${{ needs.vm-arch.outputs.arch }}
+          platforms: linux/${{ vars.VM_ARCH || 'arm64' }}
           push: true
           # Supply-chain attestations: provenance (how/where the image
           # was built) + SBOM (what is inside it) — pushed alongside the
