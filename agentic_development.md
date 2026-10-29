@@ -77,3 +77,4 @@
     - First write the plan here what you are going to do, then I will approve ✅ (approved 2026-10-10)
     - After you are done, you can guide me what I need to setup my manually like github secrets, cloud account creation and configs, etc ⏳
 - Ops 2026-10-25: frontend image now COPYs favicon.ico (Umami needs /favicon.ico at root; favicon.svg alone is never requested). Manual e5619c5 deploy (quota crunch) via buildx arm64 + VM gadg_ blue/green flip.
+- Ops 2026-10-29: favicon.ico regenerated via librsvg (qlmanage render was blank white). Manual 4a84634 deploy (buildx arm64, retagged unchanged counter/facts/image, VM flip green→blue). This build also finally bakes UMAMI_SRC/ID (website c0114b9d-…) — e5619c5 had shipped with NO beacon, so GHA analytics are live only from this deploy on.
