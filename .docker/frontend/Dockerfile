@@ -38,6 +38,7 @@ RUN apk add --no-cache curl \
 COPY app/frontend/*.html /usr/share/nginx/html/
 COPY app/frontend/js/ /usr/share/nginx/html/js/
 COPY app/frontend/favicon.svg /usr/share/nginx/html/
+COPY app/frontend/favicon.ico /usr/share/nginx/html/
 COPY app/frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY GUIDE.md /usr/share/nginx/html/GUIDE.md
 
