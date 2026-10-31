@@ -58,6 +58,7 @@
   GUIDE.md only. SUPERSEDED (2026-10-24): README.md per the user's README-per-repo instruction; devlog.md added as the AI-section archive (bookkeeping only).
 
 ## Active tasks
+- Faro crash-telemetry beacon ✅ 2026-10-31 (commit d8b5900 on development): token-swap carrier (FARO_CONFIG placeholder + swap-or-delete sed, umami-mirrored), snippets 90/90 + actionlint + compose config green; loader-sim pos/neg verified. Needs repo Variables FARO_URL + FARO_APP=githubactionsdevelopersguide; prod via the protected dev→prod PR (user).
 - ⏳ Watch the consolidation push land live (new CI shape; Deploy development should skip-with-reason while the runner is offline; workflow history wiped to watch from scratch).
 - ⏳ Production promotion PR + approval click through the NEW flow (publish chain → workflow_run deploy) — not yet exercised.
 - Optional follow-ups: requirements-dev.txt; Docker-Hub-variant exercise.
