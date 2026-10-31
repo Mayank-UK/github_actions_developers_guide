@@ -62,6 +62,21 @@ RUN if [ -n "$UMAMI_SRC" ] && [ -n "$UMAMI_ID" ]; then \
         sed -i '/__UMAMI_SRC__/d' /usr/share/nginx/html/*.html; \
     fi
 
+# Grafana Faro crash telemetry (same carrier discipline as Umami above):
+# each page's <head> carries a FARO_CONFIG line with __FARO_URL__/
+# __FARO_APP__ placeholder tokens; /js/crash-telemetry.js (shipped in every
+# build) no-ops without it. BOTH args non-empty → swap the tokens
+# (| delimiter — the collector URL contains / and :); otherwise DELETE the
+# config line so unconfigured builds ship no beacon and the loader no-ops.
+# Values are PUBLIC (repo Variables FARO_URL/FARO_APP), never secrets.
+ARG FARO_URL=
+ARG FARO_APP=
+RUN if [ -n "$FARO_URL" ] && [ -n "$FARO_APP" ]; then \
+        sed -i "s|__FARO_URL__|${FARO_URL}|g; s|__FARO_APP__|${FARO_APP}|g" /usr/share/nginx/html/*.html; \
+    else \
+        sed -i '/__FARO_URL__/d' /usr/share/nginx/html/*.html; \
+    fi
+
 # Syntax-gate the shipped config at build time (this image's "test").
 # nginx -t resolves static proxy_pass upstreams at parse time, but
 # facts/counter/image only exist at runtime — and BuildKit mounts

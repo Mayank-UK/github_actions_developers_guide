@@ -257,6 +257,8 @@ jobs:
           build-args: |
               UMAMI_SRC=${{ vars.UMAMI_SRC || secrets.UMAMI_SRC || '' }}
               UMAMI_ID=${{ vars.UMAMI_ID || secrets.UMAMI_ID || '' }}
+              FARO_URL=${{ vars.FARO_URL || '' }}
+              FARO_APP=${{ vars.FARO_APP || '' }}
 
       - name: Build counter image (local, amd64)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -460,6 +462,8 @@ jobs:
           build-args: |
               UMAMI_SRC=${{ matrix.service == 'frontend' && (vars.UMAMI_SRC || secrets.UMAMI_SRC || '') || '' }}
               UMAMI_ID=${{ matrix.service == 'frontend' && (vars.UMAMI_ID || secrets.UMAMI_ID || '') || '' }}
+              FARO_URL=${{ matrix.service == 'frontend' && (vars.FARO_URL || '') || '' }}
+              FARO_APP=${{ matrix.service == 'frontend' && (vars.FARO_APP || '') || '' }}
 
   # GHCR tag retention: every production push leaves one sha-<7> version per
   # package. This job deletes sha-tagged versions beyond the newest 10 —

@@ -29,6 +29,20 @@ The public site is measured with self-hosted
   themselves are collected by the beacon; events are only real user
   interactions.
 
+### Crash telemetry
+
+Grafana Faro collects uncaught browser errors (public endpoint, no
+personal data). Same build-time swap as Umami: each page's `<head>`
+carries a `FARO_CONFIG` line with `__FARO_URL__` / `__FARO_APP__`
+placeholder tokens; `.docker/frontend/Dockerfile` swaps them via the
+`FARO_URL` / `FARO_APP` build args, passed by CI from the repository
+Variables `FARO_URL` (collector endpoint, e.g.
+`https://faro.example.com/collect`) and `FARO_APP`
+(`githubactionsdevelopersguide`). Both PUBLIC — Variables, never secrets.
+Builds without the args delete the config line entirely;
+`app/frontend/js/crash-telemetry.js` (shipped always) then no-ops —
+byte-clean pages, exactly the Umami discipline.
+
 ### UTM convention
 
 Links posted off-site carry UTM parameters so referrers are readable in
